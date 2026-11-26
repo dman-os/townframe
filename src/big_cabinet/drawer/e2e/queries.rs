@@ -1307,16 +1307,9 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
 
     let transaction = node.sql.begin_write().await.unwrap();
     for id in [&parent, &child] {
-        sqlite::clear_docs(&transaction, id.to_string())
-            .await
-            .unwrap();
-        transaction
-            .execute(
-                "DELETE FROM big_cabinet_drawer_children WHERE parent_id = :id OR child_id = :id",
-                (id.to_string(),),
-            )
-            .await
-            .unwrap();
+        // Only the descriptor rows go: the doc and child rows are the datum-set worker's
+        // projection of the roster datums, which a drawer doc arriving by sync gets whether or not
+        // the drawer was ever remembered, so they are what a synced-in drawer already has.
         transaction
             .execute(
                 "DELETE FROM big_cabinet_drawers WHERE drawer_id = :id",
@@ -1707,4 +1700,216 @@ async fn a_drawer_reach_reads_the_drawers_own_document_but_does_not_write_it() {
         ClientError::Method(DocsError::Denied),
     );
     fx.node.stop().await;
+}
+
+/// A poll of the docs `drawer` itself lists at Read or above, each with its note: the worker
+/// shape (ADR 026 §9) over a non-transitive `InDrawer`.
+async fn member_poll(
+    node: &Node,
+    actor: &OpenedActor,
+    drawer: &DrawerId,
+) -> crate::test_poll::Poller {
+    let note_tag = DatumTag::new(NOTE).unwrap();
+    crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: node
+                .mint_doc(
+                    actor,
+                    DocScope {
+                        drawers: [(
+                            drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                        )]
+                        .into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::InDrawer {
+                        drawer_id: drawer.clone(),
+                        transitive: false,
+                        at_least: Access::Read,
+                    },
+                    Predicate::HasTag {
+                        tag: note_tag.clone(),
+                    },
+                ],
+            },
+            datums: DatumSelection::Of {
+                tags: [note_tag].into(),
+                keys: BTreeSet::new(),
+            },
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    )
+}
+
+/// Write `set` and `remove` on the roster of `drawer` straight through DocsRepo, the way a roster
+/// change arriving from a peer lands: no DrawerService operation, no ledger row, nothing that
+/// writes a membership row. Returns once the datum-set worker has settled the write.
+async fn write_roster_raw(
+    node: &Node,
+    drawer: &DrawerId,
+    set: BTreeMap<DatumKey, Value>,
+    remove: BTreeSet<DatumKey>,
+) {
+    let receipt = node
+        .core()
+        .write_roster(&RequestContext::root(), drawer, None, set, remove)
+        .await
+        .unwrap();
+    node.core().settle_roster(&receipt).await.unwrap();
+}
+
+/// A poll that pages the revision carrying a roster entry sees its document enter, even though
+/// the service that wrote the entry died before it did anything else. The membership row used to
+/// be written by that service after the roster datum, so a poll paging the revision in between
+/// asked for the row, found none, and answered `leave`: the cursor moved past the revision and
+/// nothing ever re-evaluated the document once the row landed. The worker now writes the row in
+/// the settle of the very revision the poll pages.
+#[tokio::test]
+async fn a_poll_paging_a_roster_revision_sees_the_enter_without_the_writing_service() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let parent = node.collection(&alice, "polled").await;
+    let home = node.collection(&alice, "home").await;
+    let doc = node.create_doc(&alice, &home, "entering").await.unwrap();
+    wait_for_datum_set(&node, &alice, &doc).await;
+
+    node.arm_crash(CrashPoint::RosterWritten);
+    let crashed = node
+        .add_doc(&alice, "crashed add", &parent, &doc, Access::Write)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&crashed, DrawersError::Storage(message) if message.contains("injected crash")),
+        "{crashed:?}"
+    );
+    assert!(
+        node.roster_datums(&parent)
+            .await
+            .contains_key(&doc_entry_key(&doc)),
+        "the roster datum landed"
+    );
+    let landed = node
+        .core()
+        .roster_receipt(&RequestContext::root(), &parent)
+        .await
+        .unwrap();
+    node.core().settle_roster(&landed).await.unwrap();
+
+    let mut poll = member_poll(&node, &alice, &parent).await;
+    next_enter(&mut poll, &doc).await;
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_roster_change_written_outside_the_service_projects_membership_through_the_worker() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let parent = node.collection(&alice, "raw-parent").await;
+    let child = node.collection(&alice, "raw-child").await;
+    let home = node.collection(&alice, "home").await;
+    let doc = node.create_doc(&alice, &home, "raw-doc").await.unwrap();
+    wait_for_datum_set(&node, &alice, &doc).await;
+    assert!(node.core().state.docs_of(&parent).await.unwrap().is_empty());
+    assert!(node.core().state.children_of(&parent).await.unwrap().is_empty());
+    let mut changes = node.core().state.subscribe_changes();
+    changes.borrow_and_update();
+
+    write_roster_raw(
+        &node,
+        &parent,
+        BTreeMap::from([
+            (
+                doc_entry_key(&doc),
+                serde_json::to_value(DrawerDocEntry::new(Access::Write)).unwrap(),
+            ),
+            (
+                child_entry_key(&child),
+                serde_json::to_value(DrawerChildEntry::new(Access::Read)).unwrap(),
+            ),
+        ]),
+        BTreeSet::new(),
+    )
+    .await;
+    assert_eq!(
+        node.core().state.docs_of(&parent).await.unwrap(),
+        BTreeMap::from([(doc.clone(), Access::Write)])
+    );
+    assert_eq!(
+        node.core().state.children_of(&parent).await.unwrap(),
+        BTreeMap::from([(child.clone(), Access::Read)])
+    );
+    assert!(
+        changes.has_changed().unwrap(),
+        "the policy and mirror subscribers hear of rows the worker wrote"
+    );
+
+    // Narrowing the entry rewrites the row rather than adding one.
+    write_roster_raw(
+        &node,
+        &parent,
+        BTreeMap::from([(
+            doc_entry_key(&doc),
+            serde_json::to_value(DrawerDocEntry::new(Access::Read)).unwrap(),
+        )]),
+        BTreeSet::new(),
+    )
+    .await;
+    assert_eq!(
+        node.core().state.docs_of(&parent).await.unwrap(),
+        BTreeMap::from([(doc.clone(), Access::Read)])
+    );
+
+    // An access level this build does not know confers nothing, so it has no row.
+    write_roster_raw(
+        &node,
+        &parent,
+        BTreeMap::from([(
+            doc_entry_key(&doc),
+            json!({"access": "Superuser"}),
+        )]),
+        BTreeSet::new(),
+    )
+    .await;
+    assert!(node.core().state.docs_of(&parent).await.unwrap().is_empty());
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn removing_a_doc_entry_projects_the_removal_and_a_poll_sees_the_leave() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let parent = node.collection(&alice, "leaving").await;
+    let home = node.collection(&alice, "home").await;
+    let doc = node.create_doc(&alice, &home, "leaving-doc").await.unwrap();
+    wait_for_datum_set(&node, &alice, &doc).await;
+    node.add_doc(&alice, "enter", &parent, &doc, Access::Write)
+        .await
+        .unwrap();
+    assert_eq!(
+        node.core().state.docs_of(&parent).await.unwrap(),
+        BTreeMap::from([(doc.clone(), Access::Write)]),
+        "the service's receipt waited for the row"
+    );
+    let mut poll = member_poll(&node, &alice, &parent).await;
+    next_enter(&mut poll, &doc).await;
+
+    write_roster_raw(
+        &node,
+        &parent,
+        BTreeMap::new(),
+        BTreeSet::from([doc_entry_key(&doc)]),
+    )
+    .await;
+    assert!(node.core().state.docs_of(&parent).await.unwrap().is_empty());
+    next_leave(&mut poll, &doc).await;
+    node.stop().await;
 }

@@ -20,7 +20,10 @@ impl Core {
         // The level is irrelevant to a removal: only which delegations exist at all. For a
         // self-doc child this is exactly the doc grant `link` made (ADR 026 §6).
         let delegations = self.child_delegations(parent, child, Access::Relay).await?;
-        let listed = self.state.child_entry(parent, child).await?.is_some();
+        let listed = self
+            .roster_entry(context, parent, &child_entry_key(child))
+            .await?
+            .is_some();
         let mut delegated = Vec::with_capacity(delegations.len());
         for delegation in delegations {
             if delegation.current(self).await?.is_some() {
@@ -31,20 +34,20 @@ impl Core {
             return Ok(None);
         }
         let receipt = if listed {
-            let receipt = self
-                .write_roster(
-                    context,
-                    parent,
-                    None,
-                    BTreeMap::new(),
-                    BTreeSet::from([child_entry_key(child)]),
-                )
-                .await?;
-            self.state.remove_child(parent, child).await?;
-            receipt
+            self.write_roster(
+                context,
+                parent,
+                None,
+                BTreeMap::new(),
+                BTreeSet::from([child_entry_key(child)]),
+            )
+            .await?
         } else {
             self.roster_receipt(context, parent).await?
         };
+        // The row goes with the datum, in the worker's settle, and the withdrawals below wait for
+        // it, so no row keeps listing a child whose delegations are already gone (ADR 019).
+        self.settle_roster(&receipt).await?;
         for delegation in delegated {
             delegation.revoke(self).await?;
         }

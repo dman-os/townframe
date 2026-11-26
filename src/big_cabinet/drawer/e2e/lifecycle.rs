@@ -40,9 +40,11 @@ async fn placement_reply_waits_for_committed_rosters() {
         assert_eq!(
             node.core()
                 .state
-                .doc_entry(target, &document)
+                .docs_of(target)
                 .await
-                .unwrap(),
+                .unwrap()
+                .get(&document)
+                .copied(),
             None
         );
         assert!(
@@ -59,9 +61,11 @@ async fn placement_reply_waits_for_committed_rosters() {
         assert_eq!(
             node.core()
                 .state
-                .doc_entry(target, &document)
+                .docs_of(target)
                 .await
-                .unwrap(),
+                .unwrap()
+                .get(&document)
+                .copied(),
             Some(Access::Admin)
         );
         assert!(
@@ -96,13 +100,19 @@ async fn dropped_placement_caller_releases_the_command_worker() {
         assert_eq!(
             node.core()
                 .state
-                .doc_entry(target, &document)
+                .docs_of(target)
                 .await
-                .unwrap(),
+                .unwrap()
+                .get(&document)
+                .copied(),
             None,
         );
         assert_eq!(
-            node.core().state.doc_entry(target, &next).await.unwrap(),
+            node.core().state.docs_of(target)
+                .await
+                .unwrap()
+                .get(&next)
+                .copied(),
             Some(Access::Admin),
         );
     }
@@ -201,9 +211,11 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
             assert_eq!(
                 node.core()
                     .state
-                    .doc_entry(target, &document)
-                    .await
-                    .unwrap(),
+                    .docs_of(target)
+                .await
+                .unwrap()
+                .get(&document)
+                .copied(),
                 Some(Access::Admin)
             );
             assert!(
@@ -330,8 +342,9 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
         "and from then on the command answers with its receipt"
     );
 
-    // The other boundary with nobody retrying: the roster says Read, the projection never
-    // heard, and boot finishes it.
+    // The other boundary with nobody retrying: the grant landed and the roster says Read, and the
+    // service died before finishing. The membership row needs no retry, because the datum-set
+    // worker projects it from the roster datum itself; boot only has the ledger row to close.
     let other = node.create_doc(&alice, &home, "other").await.unwrap();
     node.arm_crash(CrashPoint::RosterWritten);
     node.add_doc(&alice, "interrupted at boot", &shared, &other, Access::Read)
@@ -354,10 +367,12 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
             .map(|listed| (listed.doc_id, listed.access))
             .collect()
     }
+    let written = node.core().roster_receipt(&RequestContext::root(), &shared).await.unwrap();
+    node.core().settle_roster(&written).await.unwrap();
     assert_eq!(
         listed(&node, &alice, &shared).await,
-        BTreeMap::from([(doc.clone(), Access::Write)]),
-        "the projection never saw the write"
+        BTreeMap::from([(doc.clone(), Access::Write), (other.clone(), Access::Read)]),
+        "the worker projected the entry without the service's help"
     );
     node.restart().await.unwrap();
     assert_eq!(

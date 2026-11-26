@@ -328,7 +328,7 @@ async fn native_metadata_observation_on_a_remote_relay_needs_no_local_grants_or_
     relay
         .core()
         .state
-        .replace_roster(&drawer, &BTreeMap::new(), &BTreeMap::new(), &prior)
+        .replace_meta_docs(&drawer, &prior)
         .await
         .unwrap();
     let observer: DrawerService = relay.drawers.as_ref().unwrap().metadata_observer();
@@ -366,6 +366,12 @@ async fn native_metadata_observation_on_a_remote_relay_needs_no_local_grants_or_
         relay.core().state.meta_docs_of(&drawer).await.unwrap(),
         metadata
     );
+    let current = relay
+        .core()
+        .roster_receipt(&context, &drawer)
+        .await
+        .unwrap();
+    relay.core().settle_roster(&current).await.unwrap();
     assert_eq!(
         relay.core().state.children_of(&drawer).await.unwrap(),
         observation.children
@@ -448,12 +454,7 @@ async fn native_metadata_observation_projects_authoritative_empty_and_ignores_se
         .unwrap();
     node.core()
         .state
-        .replace_roster(
-            &self_doc,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &before.meta_docs,
-        )
+        .replace_meta_docs(&self_doc, &before.meta_docs)
         .await
         .unwrap();
     assert_eq!(

@@ -1,8 +1,13 @@
 //! The local drawer projection: which drawers this node knows, what their rosters list, and the
 //! two local drawers. SQLite, owned by DrawerService.
 //!
-//! It is a projection, not authority: the roster datums on the drawer docs are authoritative, and
-//! these rows are what this service wrote plus what it read back from them. They exist so that
+//! It is a projection, not authority: the roster datums on the drawer docs are authoritative.
+//! The doc and child membership rows are written only by the datum-set worker, in the settle
+//! transaction of the revision that carries the roster datum (ADR 024: indexes are fed by the
+//! change stream alone), so a reader of the change stream and a reader of these rows agree; a
+//! caller that must see its own roster write waits on `DatumSetStore::settled_through`. The rest
+//! (drawer descriptors, meta-doc references, the local drawers) is what this service wrote plus
+//! what it read back from the drawer docs. They exist so that
 //! "which drawers hold doc X" — the question every DocsRepo access check asks — is one indexed
 //! query rather than a scan of every drawer doc on the node.
 
@@ -18,6 +23,7 @@ use sqlite_rs::Sql;
 use sqlite_rs::SqlError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use big_cabinet_core::drawer::protocol::DrawerRecord;
@@ -26,7 +32,9 @@ use big_cabinet_core::drawer::protocol::LocalDrawers;
 pub(crate) struct State {
     sql: Database,
     local: OnceLock<LocalDrawers>,
-    changes: tokio::sync::watch::Sender<u64>,
+    /// Shared with the datum-set worker, which writes the doc and child membership rows and
+    /// bumps it when it does; this service bumps it for the rest of the projection.
+    changes: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 pub(crate) enum ScopeTarget<'a> {
@@ -144,14 +152,16 @@ fn drawer_record(drawer_id: &str, descriptor_json: &str) -> DrawerRecord {
 }
 
 impl State {
-    pub(crate) async fn open(sql: Database) -> Result<Self, DrawersError> {
+    pub(crate) async fn open(
+        sql: Database,
+        changes: Arc<tokio::sync::watch::Sender<u64>>,
+    ) -> Result<Self, DrawersError> {
         // The descriptor is stored verbatim, not decomposed: it is an open datum, and a
         // column per field (or a CHECK on the layout tag) would reject exactly the future
         // members carrying exists to survive. Interpretation happens at read time.
         sql.apply_migrations(sqlite::MIGRATION_TABLE, sqlite::MIGRATIONS)
             .await
             .map_err(storage)?;
-        let (changes, _) = tokio::sync::watch::channel(0);
         let state = Self {
             sql,
             local: OnceLock::new(),
@@ -394,47 +404,6 @@ impl State {
         Ok(())
     }
 
-    pub(crate) async fn put_doc(
-        &self,
-        drawer: &DrawerId,
-        doc: &DocId,
-        access: Access,
-    ) -> Result<(), DrawersError> {
-        sqlite::put_doc(
-            &self.sql,
-            drawer.to_string(),
-            doc.to_string(),
-            access.as_str().to_owned(),
-        )
-        .await
-        .map_err(storage)?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    pub(crate) async fn remove_doc(
-        &self,
-        drawer: &DrawerId,
-        doc: &DocId,
-    ) -> Result<(), DrawersError> {
-        sqlite::remove_doc(&self.sql, drawer.to_string(), doc.to_string())
-            .await
-            .map_err(storage)?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    pub(crate) async fn doc_entry(
-        &self,
-        drawer: &DrawerId,
-        doc: &DocId,
-    ) -> Result<Option<Access>, DrawersError> {
-        let access = sqlite::doc_entry(&self.sql, drawer.to_string(), doc.to_string())
-            .await
-            .map_err(storage)?;
-        Ok(access.as_deref().map(access_column))
-    }
-
     /// The roster's doc entries, as this node last saw them.
     pub(crate) async fn docs_of(
         &self,
@@ -449,47 +418,7 @@ impl State {
             .collect())
     }
 
-    pub(crate) async fn put_child(
-        &self,
-        parent: &DrawerId,
-        child: &DrawerId,
-        access: Access,
-    ) -> Result<(), DrawersError> {
-        sqlite::put_child(
-            &self.sql,
-            parent.to_string(),
-            child.to_string(),
-            access.as_str().to_owned(),
-        )
-        .await
-        .map_err(storage)?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    pub(crate) async fn remove_child(
-        &self,
-        parent: &DrawerId,
-        child: &DrawerId,
-    ) -> Result<(), DrawersError> {
-        sqlite::remove_child(&self.sql, parent.to_string(), child.to_string())
-            .await
-            .map_err(storage)?;
-        self.notify_changed();
-        Ok(())
-    }
-
-    pub(crate) async fn child_entry(
-        &self,
-        parent: &DrawerId,
-        child: &DrawerId,
-    ) -> Result<Option<Access>, DrawersError> {
-        let access = sqlite::child_entry(&self.sql, parent.to_string(), child.to_string())
-            .await
-            .map_err(storage)?;
-        Ok(access.as_deref().map(access_column))
-    }
-
+    /// The roster's child entries, as this node last saw them.
     pub(crate) async fn children_of(
         &self,
         parent: &DrawerId,
@@ -515,82 +444,28 @@ impl State {
         Ok(meta_doc_rows(rows))
     }
 
-    /// Replace a drawer's roster rows with what its doc says now: the rescan after a boot or a
-    /// read that found the projection behind the doc.
-    pub(crate) async fn replace_roster(
+    /// Replace a drawer's meta-doc references with what its doc says now: the rescan after a boot
+    /// or a read that found the projection behind the doc. The doc and child membership rows are
+    /// not part of this: the datum-set worker projects those from the roster datums themselves.
+    pub(crate) async fn replace_meta_docs(
         &self,
         drawer: &DrawerId,
-        docs: &BTreeMap<DocId, Access>,
-        children: &BTreeMap<DrawerId, Access>,
         meta_docs: &MetaDocRows,
     ) -> Result<(), DrawersError> {
         let transaction = self.sql.begin_write().await.map_err(storage)?;
         let id = drawer.to_string();
-        let stored_docs: BTreeMap<_, _> = sqlite::docs_of(&transaction, id.clone())
-            .await
-            .map_err(storage)?
-            .into_iter()
-            .map(|row| (id_column(&row.doc_id), access_column(&row.access)))
-            .collect();
-        let stored_children: BTreeMap<_, _> = sqlite::children_of(&transaction, id.clone())
-            .await
-            .map_err(storage)?
-            .into_iter()
-            .map(|row| (id_column(&row.child_id), access_column(&row.access)))
-            .collect();
         let stored_meta_docs = meta_doc_rows(
             sqlite::meta_docs(&transaction, id.clone())
                 .await
                 .map_err(storage)?,
         );
-        if &stored_docs == docs && &stored_children == children && &stored_meta_docs == meta_docs {
+        if &stored_meta_docs == meta_docs {
             transaction.rollback().await.map_err(storage)?;
             return Ok(());
         }
-        sqlite::clear_docs(&transaction, id.clone())
-            .await
-            .map_err(storage)?;
-        sqlite::clear_children(&transaction, id.clone())
-            .await
-            .map_err(storage)?;
         sqlite::clear_meta_docs(&transaction, id.clone())
             .await
             .map_err(storage)?;
-        for (table, source, target, entries) in [
-            ("big_cabinet_drawer_docs", "drawer_id", "doc_id", docs),
-            (
-                "big_cabinet_drawer_children",
-                "parent_id",
-                "child_id",
-                children,
-            ),
-        ] {
-            let mut entries = entries.iter().peekable();
-            while entries.peek().is_some() {
-                let mut query = Sql::new("INSERT INTO ");
-                query
-                    .ident(table)
-                    .push(" (")
-                    .ident(source)
-                    .push(", ")
-                    .ident(target)
-                    .push(", access) VALUES ");
-                for (index, (target_id, access)) in entries.by_ref().take(256).enumerate() {
-                    if index != 0 {
-                        query.push(", ");
-                    }
-                    query
-                        .push("(")
-                        .bind(&id)
-                        .push(", ")
-                        .bind(target_id.to_string())
-                        .push(", ")
-                        .bind(access.as_str())
-                        .push(")");
-                }
-                query.execute(&transaction).await.map_err(storage)?;
-            }
-        }
         for (root, slots) in meta_docs {
             let mut entries = slots.iter().peekable();
             while entries.peek().is_some() {
@@ -622,6 +497,47 @@ impl State {
             }
         }
         transaction.commit().await.map_err(storage)?;
+        self.notify_changed();
+        Ok(())
+    }
+}
+
+/// Fixtures that stand in for the datum-set worker's membership projection, through the very
+/// queries it settles with (`datum_set::apply_membership`).
+#[cfg(test)]
+impl State {
+    pub(crate) async fn put_doc(
+        &self,
+        drawer: &DrawerId,
+        doc: &DocId,
+        access: Access,
+    ) -> Result<(), DrawersError> {
+        sqlite::put_doc(
+            &self.sql,
+            drawer.to_string(),
+            doc.to_string(),
+            access.as_str().to_owned(),
+        )
+        .await
+        .map_err(storage)?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub(crate) async fn put_child(
+        &self,
+        parent: &DrawerId,
+        child: &DrawerId,
+        access: Access,
+    ) -> Result<(), DrawersError> {
+        sqlite::put_child(
+            &self.sql,
+            parent.to_string(),
+            child.to_string(),
+            access.as_str().to_owned(),
+        )
+        .await
+        .map_err(storage)?;
         self.notify_changed();
         Ok(())
     }

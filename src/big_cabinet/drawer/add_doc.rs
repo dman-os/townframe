@@ -3,8 +3,6 @@
 use super::ledger::Op;
 use super::*;
 use crate::doc::pipeline::digest;
-use big_cabinet_core::doc::At;
-use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_repo::keyhive_core::principal::identifier::Identifier;
 use std::collections::BTreeSet;
@@ -47,32 +45,7 @@ impl Core {
         drawer: &DrawerId,
     ) -> Result<WriteReceipt, DrawersError> {
         let read = self
-            .as_signer(
-                context,
-                self.issuer,
-                DocScope {
-                    read: DocScope::read_all([drawer.clone()]),
-                    ..Default::default()
-                },
-                |Authorization {
-                     authority: capability,
-                     ..
-                 }| async move {
-                    self.docs()
-                        .call(
-                            context.child(),
-                            ReadDatums {
-                                capability,
-                                doc_id: drawer.clone(),
-                                at: At::Current,
-                                datums: Some(BTreeSet::new()),
-                                optimistic: false,
-                            },
-                        )
-                        .await
-                        .map_err(docs_error)
-                },
-            )
+            .read_datums(context, drawer, Some(BTreeSet::new()))
             .await?;
         Ok(WriteReceipt {
             doc_id: drawer.clone(),
@@ -88,7 +61,11 @@ impl Core {
         doc: &DocId,
         access: Access,
     ) -> Result<Option<WriteReceipt>, DrawersError> {
-        if self.state.doc_entry(drawer, doc).await? == Some(access) {
+        if self
+            .roster_entry(context, drawer, &doc_entry_key(doc))
+            .await?
+            == Some(access)
+        {
             return Ok(None);
         }
         let entry = DrawerDocEntry::new(access);
@@ -104,9 +81,12 @@ impl Core {
                 BTreeSet::new(),
             )
             .await?;
+        // The membership row is not written here: the datum-set worker projects it from the roster
+        // datum in the settle of the revision that carries it, and the crash point sits before the
+        // barrier below to show that nothing this service does afterwards is needed for it.
         #[cfg(test)]
         self.crash_at(super::CrashPoint::RosterWritten)?;
-        self.state.put_doc(drawer, doc, access).await?;
+        self.settle_roster(&receipt).await?;
         Ok(Some(receipt))
     }
 
@@ -184,7 +164,13 @@ impl Core {
             async move {
                 match written {
                     Some(receipt) => Ok(receipt),
-                    None => self.roster_receipt(context, drawer).await,
+                    // Already listed, perhaps by an attempt that died before the worker
+                    // settled its entry: the rows must catch up before the caller reads them.
+                    None => {
+                        let receipt = self.roster_receipt(context, drawer).await?;
+                        self.settle_roster(&receipt).await?;
+                        Ok(receipt)
+                    }
                 }
             }
         }))

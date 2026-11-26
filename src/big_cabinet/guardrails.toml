@@ -112,7 +112,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_INLINE_SQL"
 path = "src/big_cabinet/drawer/e2e/queries.rs"
 symbol = "module::synced_in_drawer_docs_are_discovered_and_projected_without_polluting_known_list"
-ceiling = 2
+ceiling = 1
 class = "LEGACY_DEBT"
 reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -138,16 +138,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 [[exemptions]]
 code = "ERROR_INLINE_SQL"
 path = "src/big_cabinet/drawer/state.rs"
-symbol = "module::State::replace_roster"
-ceiling = 2
-class = "LEGACY_DEBT"
-reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_INLINE_SQL"
-path = "src/big_cabinet/drawer/state/tests.rs"
-symbol = "module::roster_batches_rollback_together_and_notify_only_after_commit"
+symbol = "module::State::replace_meta_docs"
 ceiling = 1
 class = "LEGACY_DEBT"
 reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"

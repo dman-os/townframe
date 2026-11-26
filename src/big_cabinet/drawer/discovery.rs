@@ -94,7 +94,7 @@ impl Core {
         drawer_id: &DrawerId,
     ) -> Result<DrawerMetadataObservation, DrawersError> {
         context.validate()?;
-        let datums = self.read_all_datums(context, drawer_id).await?;
+        let datums = self.read_datums(context, drawer_id, None).await?.datums;
         let descriptor = Self::metadata_descriptor(drawer_id, &datums)?;
         let record = create::record_of(drawer_id, &descriptor);
         let mut observation = DrawerMetadataObservation {
@@ -107,7 +107,6 @@ impl Core {
         match record.layout_kind() {
             Some(LayoutKind::SingleGroup) => {
                 let RosterRows {
-                    docs,
                     children,
                     meta_docs,
                 } = Self::read_roster(drawer_id, datums)?;
@@ -139,18 +138,11 @@ impl Core {
                     .await?;
                 let prior = self.state.meta_docs_of(drawer_id).await?;
                 let projected = observation.projected_meta_docs(prior);
-                self.state
-                    .replace_roster(drawer_id, &docs, &observation.children, &projected)
-                    .await?;
+                self.state.replace_meta_docs(drawer_id, &projected).await?;
             }
             Some(LayoutKind::SelfDoc) => {
                 self.state
-                    .replace_roster(
-                        drawer_id,
-                        &BTreeMap::new(),
-                        &BTreeMap::new(),
-                        &BTreeMap::new(),
-                    )
+                    .replace_meta_docs(drawer_id, &BTreeMap::new())
                     .await?;
             }
             None => {}
@@ -206,8 +198,8 @@ impl Core {
         {
             return Ok((MetadataRootStatus::Denied, BTreeMap::new()));
         }
-        let datums = match self.read_all_datums(context, root).await {
-            Ok(datums) => datums,
+        let datums = match self.read_datums(context, root, None).await {
+            Ok(read) => read.datums,
             Err(error) => {
                 return Ok((MetadataRootStatus::from_read_error(error)?, BTreeMap::new()));
             }

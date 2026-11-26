@@ -11,9 +11,12 @@ use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::declared_references;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::DrawerChildEntry;
+use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::query::Predicate;
 use big_repo::AutomergeFrontierEvent;
 use big_repo::AutomergeFrontierRevisionStore;
@@ -173,6 +176,11 @@ struct Prepared {
     /// position is absent rather than empty, so `settle` replaces only the
     /// edges of routes the projection actually read.
     ref_edges: BTreeMap<DatumRoute, Vec<DatumRefEdge>>,
+    /// The access each live, gate-accepted `docEntry`/`childEntry` slot of this projection
+    /// states. A roster slot of the projection that is absent here (removed, rejected, pending
+    /// or at an access level this build does not know) confers no membership, so `settle`
+    /// deletes its row.
+    memberships: BTreeMap<DatumKey, DrawerAccess>,
 }
 
 #[derive(Clone)]
@@ -183,9 +191,13 @@ pub struct DatumSetStore {
     /// The compiled schemas that decide which datum tags declare references,
     /// and therefore which routes this worker extracts edges for.
     schemas: Arc<SchemaRepo>,
-    /// Settlement counter tests watch instead of polling the index.
-    #[cfg(test)]
+    /// Settlement counter: bumped after every committed settle. `settled_through` waits on it, and
+    /// so do tests that would otherwise poll the index.
     settled: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Bumped after a settle that wrote drawer membership rows. It is the drawer projection's
+    /// change counter (`DrawerService` subscribers re-derive policy and mirrors from it), shared
+    /// with the drawer service's own writes to the rest of that projection.
+    drawer_changes: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl DatumSetStore {
@@ -202,25 +214,92 @@ impl DatumSetStore {
         let input_state =
             SqliteDeltaWalkerStateRepo::new(sql.clone(), DATUM_SET_ID, "automerge-frontier")
                 .await?;
-        #[cfg(test)]
         let (settled, _) = tokio::sync::watch::channel(0);
+        let (drawer_changes, _) = tokio::sync::watch::channel(0);
         Ok(Self {
             sql,
             frontier,
             input_state,
             schemas,
-            #[cfg(test)]
             settled: Arc::new(settled),
+            drawer_changes: Arc::new(drawer_changes),
         })
     }
 
     /// Watch the number of settled projections. A test that has driven a change
     /// through the repository waits on this instead of polling the index for
-    /// convergence; the entries and the reference edges of one revision land in
-    /// the same settle, so one bump covers both.
+    /// convergence; the entries, the reference edges and the drawer membership rows of
+    /// one revision land in the same settle, so one bump covers all of them.
+    /// `settled_through` is the production wait.
     #[cfg(test)]
     pub(crate) fn subscribe_settled(&self) -> tokio::sync::watch::Receiver<u64> {
         self.settled.subscribe()
+    }
+
+    /// The change counter of the drawer projection, which this worker writes the membership
+    /// rows of and the drawer service writes the rest of.
+    pub(crate) fn drawer_changes(&self) -> Arc<tokio::sync::watch::Sender<u64>> {
+        Arc::clone(&self.drawer_changes)
+    }
+
+    /// Wait until the worker has settled `doc_id` at heads that include every one of `heads`.
+    ///
+    /// Why this exists: the drawer membership rows now move with the datum-set revision, in the
+    /// settle transaction that indexes the roster datum (ADR 024: indexes are fed only by the
+    /// change stream, local writes take the remote path). A local roster write is therefore
+    /// visible in the rows only after the worker settles the revision carrying it, so a caller
+    /// that must read its own write (the drawer operations, `GetDrawer`, discovery) asks for the
+    /// receipt's heads here instead of assuming the rows are already there.
+    ///
+    /// Coverage is ancestry, not equality: the document may have moved on past `heads` by the
+    /// time it settles, and that settles them too. There is no timeout and no retry: the wait is
+    /// woken by the settle counter alone. The worker parks a document it cannot read (missing
+    /// dependencies, not yet materialized); a document that is not materialized here is refused
+    /// with an error rather than waited on, since the worker would never settle it. A local write
+    /// leaves its document materialized, so that refusal is a broken invariant, not a lag.
+    pub(crate) async fn settled_through(
+        &self,
+        repo: &SharedBigRepo,
+        doc_id: &DocId,
+        heads: &[ChangeHash],
+    ) -> Res<()> {
+        // Subscribed before the first check, so a settle landing between the check and the wait
+        // still wakes it.
+        let mut settled = self.settled.subscribe();
+        loop {
+            let handle = match repo.get_doc_for_projection(doc_id).await? {
+                DocLookup::Ready(handle) => handle,
+                DocLookup::Missing | DocLookup::PendingMaterialization => {
+                    return Err(ferr!(
+                        "document {doc_id} is not materialized, so the worker cannot settle it"
+                    ));
+                }
+            };
+            if let Some(DocState {
+                heads: Some(settled_heads),
+                ..
+            }) = self.doc_state(doc_id).await?
+            {
+                let covered = handle
+                    .with_document(|doc| {
+                        // `get_changes(have)` is every change `have` does not already cover.
+                        let uncovered: BTreeSet<ChangeHash> = doc
+                            .get_changes(&settled_heads)
+                            .into_iter()
+                            .map(|change| change.hash())
+                            .collect();
+                        heads.iter().all(|head| !uncovered.contains(head))
+                    })
+                    .await?;
+                if covered {
+                    return Ok(());
+                }
+            }
+            settled
+                .changed()
+                .await
+                .expect("the store owns the settle counter");
+        }
     }
 
     /// Open the frontier across every tag namespace, for consumers (such as
@@ -529,7 +608,15 @@ impl DatumSetStore {
                 .apply_in_context(&mut transaction, mutations)
                 .await?;
         }
+        let mut drawer_rows = false;
         for (key, value) in slots {
+            drawer_rows |= apply_membership(
+                &transaction,
+                &doc_id,
+                &key,
+                prepared.memberships.get(&key).copied(),
+            )
+            .await?;
             match value {
                 DatumMembership::Present {
                     doc_heads,
@@ -571,7 +658,9 @@ impl DatumSetStore {
         )
         .await?;
         transaction.commit().await?;
-        #[cfg(test)]
+        if drawer_rows {
+            self.drawer_changes.send_modify(|changes| *changes += 1);
+        }
         self.settled.send_modify(|settles| *settles += 1);
         self.frontier.notify_changed();
         Ok(())
@@ -827,13 +916,65 @@ impl DatumSetStore {
             view.project(baseline)?
         };
         let ref_edges = self.reference_edges(doc, &work.doc_id, heads, &slots)?;
+        let memberships = self.memberships(doc, &work.doc_id, heads, &slots)?;
         Ok(Some(Prepared {
             work,
             previous,
             slots,
             replace_all,
             ref_edges,
+            memberships,
         }))
+    }
+
+    /// The access every live `docEntry` and `childEntry` slot of this projection states, read at
+    /// the delta's heads with the same gate-and-hydrate path the reference edges use.
+    ///
+    /// A slot whose value is not gate-accepted, does not decode, or names an access level this
+    /// build does not know confers nothing (an unknown level never grants or orders), so it is
+    /// left out and `settle` drops its row, exactly as a removed entry's.
+    fn memberships(
+        &self,
+        doc: &mut Automerge,
+        doc_id: &DocId,
+        heads: &[ChangeHash],
+        slots: &BTreeMap<DatumKey, DatumMembership>,
+    ) -> Res<BTreeMap<DatumKey, DrawerAccess>> {
+        let mut memberships = BTreeMap::new();
+        for (key, membership) in slots {
+            let tag = key.tag().as_str();
+            if !matches!(membership, DatumMembership::Present { .. })
+                || (tag != DrawerDocEntry::ID && tag != DrawerChildEntry::ID)
+            {
+                continue;
+            }
+            let schema = self
+                .schemas
+                .resolve_for_read(tag)
+                .expect("the core schemas declare the drawer entry tags");
+            let route = DatumRoute {
+                doc_id: doc_id.clone(),
+                datum_key: key.clone(),
+            };
+            let Some(value) = accepted_value(doc, &route, heads, schema.compiled())? else {
+                continue;
+            };
+            // The value passed the entry's compiled schema in `accepted_value`; one the Rust type
+            // still refuses came from a writer and confers nothing, like any unreadable entry.
+            let access = if tag == DrawerDocEntry::ID {
+                serde_json::from_value::<DrawerDocEntry>(value)
+                    .ok()
+                    .and_then(|entry| entry.access.known())
+            } else {
+                serde_json::from_value::<DrawerChildEntry>(value)
+                    .ok()
+                    .and_then(|entry| entry.access.known())
+            };
+            if let Some(access) = access {
+                memberships.insert(key.clone(), access);
+            }
+        }
+        Ok(memberships)
     }
 
     /// The declared references of every gate-accepted datum in this projection,
@@ -994,6 +1135,7 @@ impl DatumSetStore {
                 slots: BTreeMap::new(),
                 replace_all: false,
                 ref_edges: BTreeMap::new(),
+                memberships: BTreeMap::new(),
             }));
         }
         if work.state.heads.is_none() {
@@ -1003,6 +1145,7 @@ impl DatumSetStore {
                 slots: BTreeMap::new(),
                 replace_all: true,
                 ref_edges: BTreeMap::new(),
+                memberships: BTreeMap::new(),
             }));
         }
         if previous
@@ -1015,6 +1158,7 @@ impl DatumSetStore {
                 slots: BTreeMap::new(),
                 replace_all: false,
                 ref_edges: BTreeMap::new(),
+                memberships: BTreeMap::new(),
             }));
         }
         let handle = match repo.get_doc_for_projection(&work.doc_id).await? {
@@ -1215,55 +1359,105 @@ impl RevisionedStore for DatumSetStore {
     }
 }
 
-/// The edges one route's value states at `heads`.
+/// The value `route` states at `heads`, `None` unless the gate accepts the datum and its value
+/// hydrates under `schema`.
 ///
 /// The caller has already established that the document carries those heads, so extraction is not
-/// allowed to park here. Only a gate-accepted value publishes edges: a rejected or pending datum's
-/// value is not what its signatures cover, and an accepted but undecodable value states nothing the
+/// allowed to park here. Only a gate-accepted value is read: a rejected or pending datum's value
+/// is not what its signatures cover, and an accepted but undecodable value states nothing the
 /// schema can read.
+fn accepted_value(
+    doc: &mut Automerge,
+    route: &DatumRoute,
+    heads: &[ChangeHash],
+    schema: &CompiledSchema,
+) -> Res<Option<serde_json::Value>> {
+    let Verdict::Accepted {
+        native: Some(_), ..
+    } = Gate::new(doc, heads).verify(&route.datum_key)
+    else {
+        return Ok(None);
+    };
+    let tx = doc
+        .transaction_at(PatchLog::null(), heads)
+        .expect("a null patch log matches any document");
+    let value = (|| -> Res<Option<serde_json::Value>> {
+        let Some((Value::Object(ObjType::Map), datums)) = tx.get(ROOT, "datums")? else {
+            return Ok(None);
+        };
+        Ok(hydrate_value(
+            &tx,
+            &datums,
+            route.datum_key.to_string().as_str().into(),
+            schema,
+        )
+        .ok())
+    })();
+    tx.rollback();
+    value
+}
+
+/// The edges one route's value states at `heads`; see [`accepted_value`] for what counts.
 fn edges_from(
     doc: &mut Automerge,
     route: &DatumRoute,
     heads: &[ChangeHash],
     schema: &CompiledSchema,
 ) -> Res<Vec<DatumRefEdge>> {
-    let Verdict::Accepted {
-        native: Some(_), ..
-    } = Gate::new(doc, heads).verify(&route.datum_key)
-    else {
+    let Some(value) = accepted_value(doc, route, heads, schema)? else {
         return Ok(Vec::new());
     };
-    let tx = doc
-        .transaction_at(PatchLog::null(), heads)
-        .expect("a null patch log matches any document");
-    let edges = (|| -> Res<Vec<DatumRefEdge>> {
-        let Some((Value::Object(ObjType::Map), datums)) = tx.get(ROOT, "datums")? else {
-            return Ok(Vec::new());
-        };
-        let value = match hydrate_value(
-            &tx,
-            &datums,
-            route.datum_key.to_string().as_str().into(),
-            schema,
-        ) {
-            Ok(value) => value,
-            Err(_) => return Ok(Vec::new()),
-        };
-        Ok(declared_references(schema, &value)
-            .into_iter()
-            .map(|found| DatumRefEdge {
-                origin: route.clone(),
-                path: found.path,
-                target: DatumRoute {
-                    doc_id: found.reference.document().resolve(&route.doc_id),
-                    datum_key: found.reference.key().clone(),
-                },
-                ref_heads: found.heads,
-            })
-            .collect())
-    })();
-    tx.rollback();
-    edges
+    Ok(declared_references(schema, &value)
+        .into_iter()
+        .map(|found| DatumRefEdge {
+            origin: route.clone(),
+            path: found.path,
+            target: DatumRoute {
+                doc_id: found.reference.document().resolve(&route.doc_id),
+                datum_key: found.reference.key().clone(),
+            },
+            ref_heads: found.heads,
+        })
+        .collect())
+}
+
+/// Project one roster slot of the document `drawer` into the drawer membership tables: a
+/// `docEntry/<doc>` slot is the row of `doc` in `drawer`'s doc list, a `childEntry/<child>` slot
+/// the row of `child` under `drawer`; `access` is what the slot states, `None` deleting the row.
+/// Any other tag is not a membership slot. Returns whether a row was written or deleted.
+///
+/// This runs inside the settle transaction of the revision that carries the slot, so the rows and
+/// the frontier revision a poll pages can never disagree about whether a roster slot exists. A
+/// slot whose key does not name a doc (a writer's invention) names no row.
+async fn apply_membership(
+    db: &impl crate::sqlite_rs_alias::Executor,
+    drawer: &str,
+    key: &DatumKey,
+    access: Option<DrawerAccess>,
+) -> Res<bool> {
+    let tag = key.tag().as_str();
+    if tag != DrawerDocEntry::ID && tag != DrawerChildEntry::ID {
+        return Ok(false);
+    }
+    let Some(target) = crate::drawer::entry_target(key) else {
+        return Ok(false);
+    };
+    let (drawer, target) = (drawer.to_owned(), target.to_string());
+    match (tag == DrawerDocEntry::ID, access) {
+        (true, Some(access)) => {
+            crate::drawer::sqlite::put_doc(db, drawer, target, access.as_str().to_owned()).await?;
+        }
+        (true, None) => {
+            crate::drawer::sqlite::remove_doc(db, drawer, target).await?;
+        }
+        (false, Some(access)) => {
+            crate::drawer::sqlite::put_child(db, drawer, target, access.as_str().to_owned()).await?;
+        }
+        (false, None) => {
+            crate::drawer::sqlite::remove_child(db, drawer, target).await?;
+        }
+    }
+    Ok(true)
 }
 
 /// Replace the stored edges of every route in `edges` with the extracted ones. Routes absent from

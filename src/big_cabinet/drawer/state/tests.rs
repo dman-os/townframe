@@ -2,114 +2,69 @@ use super::*;
 use big_cabinet_core::drawer::GroupKey;
 use sqlite_rs::SqliteRuntime;
 
+async fn open_state(sql: Database) -> State {
+    State::open(sql, Arc::new(tokio::sync::watch::channel(0).0))
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
-async fn roster_batches_rollback_together_and_notify_only_after_commit() {
+async fn meta_doc_batches_rollback_together_and_notify_only_after_commit() {
     let runtime = SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[]).unwrap();
-    let state = State::open(sql.clone()).await.unwrap();
-    let [drawer, old_doc, old_child] = [240_u8, 241, 242].map(|value| DocId::new([value; 32]));
-    let before_docs = BTreeMap::from([(old_doc.clone(), Access::Read)]);
-    let before_children = BTreeMap::from([(old_child.clone(), Access::Write)]);
-    let before_meta = BTreeMap::from([(
+    let state = open_state(sql.clone()).await;
+    let drawer = DocId::new([240; 32]);
+    let poison = DocId::new([245; 32]);
+    let before = BTreeMap::from([(
         MetaRoot::Public,
         BTreeMap::from([("timeline/main".to_owned(), DocId::new([243; 32]))]),
     )]);
-    state
-        .replace_roster(&drawer, &before_docs, &before_children, &before_meta)
-        .await
-        .unwrap();
+    state.replace_meta_docs(&drawer, &before).await.unwrap();
     let mut changes = state.subscribe_changes();
-    let snapshot = sql.begin_read().await.unwrap();
-    let docs: BTreeMap<_, _> = (1_u16..=513)
+    // More slots than one insert batch (256) holds, the poisoned one last, so the failure lands
+    // in a later batch than rows that already went in.
+    let slots: BTreeMap<_, _> = (1_u16..=513)
         .map(|value| {
             let mut bytes = [0; 32];
             bytes[..2].copy_from_slice(&value.to_be_bytes());
-            (DocId::new(bytes), Access::Admin)
+            (format!("slot/{value:04}"), DocId::new(bytes))
         })
         .collect();
-    let mut children: BTreeMap<_, _> = docs
-        .keys()
-        .take(257)
-        .cloned()
-        .map(|id| (id, Access::Read))
-        .collect();
-    *children.last_entry().unwrap().get_mut() = Access::Relay;
-    let meta = BTreeMap::from([
-        (
-            MetaRoot::Public,
-            BTreeMap::from([
-                (
-                    "timeline/main".to_owned(),
-                    docs.keys().next().unwrap().clone(),
-                ),
-                ("index/main".to_owned(), DocId::new([244; 32])),
-            ]),
-        ),
+    let mut after = BTreeMap::from([
+        (MetaRoot::Public, slots),
         (
             MetaRoot::Sensitive,
-            BTreeMap::from([("notes/private".to_owned(), DocId::new([245; 32]))]),
+            BTreeMap::from([("notes/private".to_owned(), poison.clone())]),
         ),
     ]);
-    sql.execute_batch(
-        "CREATE TRIGGER fail_roster_child BEFORE INSERT ON big_cabinet_drawer_children
-         WHEN NEW.access = 'Relay'
-         BEGIN SELECT RAISE(ABORT, 'injected roster failure'); END;",
-    )
+    sql.execute_batch(&format!(
+        "CREATE TRIGGER fail_meta_doc BEFORE INSERT ON big_cabinet_drawer_meta_docs
+         WHEN NEW.doc_id = '{poison}'
+         BEGIN SELECT RAISE(ABORT, 'injected roster failure'); END;"
+    ))
     .await
     .unwrap();
     let error = state
-        .replace_roster(&drawer, &docs, &children, &meta)
+        .replace_meta_docs(&drawer, &after)
         .await
         .unwrap_err();
     assert!(
         matches!(error, DrawersError::Storage(ref message) if message.contains("injected roster failure"))
     );
     assert!(!changes.has_changed().unwrap());
-    assert_eq!(state.docs_of(&drawer).await.unwrap(), before_docs);
-    assert_eq!(state.children_of(&drawer).await.unwrap(), before_children);
-    assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), before_meta);
-    sql.execute_batch("DROP TRIGGER fail_roster_child")
+    assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), before);
+    sql.execute_batch("DROP TRIGGER fail_meta_doc")
         .await
         .unwrap();
-    state
-        .replace_roster(&drawer, &docs, &children, &meta)
-        .await
-        .unwrap();
+    state.replace_meta_docs(&drawer, &after).await.unwrap();
     changes.changed().await.unwrap();
     assert_eq!(*changes.borrow_and_update(), 2);
-    assert_eq!(state.docs_of(&drawer).await.unwrap(), docs);
-    assert_eq!(state.children_of(&drawer).await.unwrap(), children);
-    assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), meta);
-    assert_eq!(
-        sqlite::doc_entry(&snapshot, drawer.to_string(), old_doc.to_string())
-            .await
-            .unwrap(),
-        Some(Access::Read.as_str().to_owned()),
-    );
-    assert_eq!(
-        sqlite::child_entry(&snapshot, drawer.to_string(), old_child.to_string())
-            .await
-            .unwrap(),
-        Some(Access::Write.as_str().to_owned()),
-    );
-    snapshot.rollback().await.unwrap();
-    state
-        .replace_roster(&drawer, &docs, &children, &meta)
-        .await
-        .unwrap();
+    assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), after);
+    state.replace_meta_docs(&drawer, &after).await.unwrap();
     assert!(!changes.has_changed().unwrap());
-    state
-        .replace_roster(
-            &drawer,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+    after.clear();
+    state.replace_meta_docs(&drawer, &after).await.unwrap();
     assert!(changes.has_changed().unwrap());
-    assert!(state.docs_of(&drawer).await.unwrap().is_empty());
-    assert!(state.children_of(&drawer).await.unwrap().is_empty());
     assert!(state.meta_docs_of(&drawer).await.unwrap().is_empty());
 }
 
@@ -143,7 +98,7 @@ async fn migrations_reopen_existing_projection_and_local_drawers() {
     )
     .await
     .unwrap();
-    let state = State::open(sql.clone()).await.unwrap();
+    let state = open_state(sql.clone()).await;
     assert_eq!(
         state
             .drawer(&local.present_id)
@@ -159,7 +114,7 @@ async fn migrations_reopen_existing_projection_and_local_drawers() {
         .await
         .unwrap();
     drop(state);
-    let reopened = State::open(sql).await.unwrap();
+    let reopened = open_state(sql).await;
     assert_eq!(reopened.local(), local);
     assert_eq!(
         reopened.drawers().await.unwrap(),
@@ -183,7 +138,7 @@ async fn migrations_reopen_existing_projection_and_local_drawers() {
 async fn document_reach_uses_reverse_indexes() {
     let runtime = SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[]).unwrap();
-    let _state = State::open(sql.clone()).await.unwrap();
+    let _state = open_state(sql.clone()).await;
     let plan = sql
         .query(
             &format!("EXPLAIN QUERY PLAN {}", sqlite::ANCESTORS_SQL),
@@ -214,7 +169,7 @@ async fn document_reach_uses_reverse_indexes() {
 #[tokio::test]
 async fn metadata_reach_preserves_audiences_through_child_attenuation() {
     let runtime = SqliteRuntime::new(Default::default());
-    let state = State::open(runtime.ephemeral(&[]).unwrap()).await.unwrap();
+    let state = open_state(runtime.ephemeral(&[]).unwrap()).await;
     let [
         parent,
         child,
@@ -242,11 +197,11 @@ async fn metadata_reach_preserves_audiences_through_child_attenuation() {
             .await
             .unwrap();
     }
+    state.put_doc(&leaf, &content, Access::Write).await.unwrap();
+    state.put_child(&leaf, &parent, Access::Admin).await.unwrap();
     state
-        .replace_roster(
+        .replace_meta_docs(
             &leaf,
-            &BTreeMap::from([(content.clone(), Access::Write)]),
-            &BTreeMap::from([(parent.clone(), Access::Admin)]),
             &BTreeMap::from([
                 (
                     MetaRoot::Public,
@@ -326,7 +281,7 @@ async fn metadata_reach_preserves_audiences_through_child_attenuation() {
 #[tokio::test]
 async fn scoped_sql_terminates_cycles_and_selects_the_strongest_path() {
     let runtime = SqliteRuntime::new(Default::default());
-    let state = State::open(runtime.ephemeral(&[]).unwrap()).await.unwrap();
+    let state = open_state(runtime.ephemeral(&[]).unwrap()).await;
     let [root, left, right, leaf, doc] = [1_u8, 2, 3, 4, 5].map(|value| DocId::new([value; 32]));
     for id in [&root, &left, &right] {
         state
