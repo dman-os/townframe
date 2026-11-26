@@ -28,6 +28,9 @@ subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2b32
 subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
 automerge = "0.12.0"
 future_form.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 # The browser backend of each getrandom major in the graph is a feature that only the final build
 # can turn on: 0.2 (keyhive's rand 0.8) `js`, 0.3 and 0.4 `wasm_js`. Without them the crate does
@@ -36,3 +39,9 @@ future_form.workspace = true
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["wasm_js"] }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+# The upstream `MinimizedTreeStore` conformance checks, and the fork's signer for sealing fixtures.
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27", features = ["conformance", "test_utils"] }

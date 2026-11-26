@@ -9,6 +9,19 @@
 //! than the revisions `big_repo` is pinned to; the two coexist in one workspace until `big_repo`
 //! is retired.
 
+pub mod sedimentree;
+
+mod sqlite {
+    pub mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
+
+use sqlite_rs as sqlite_rs_alias;
+
+pub use sqlite::queries::MIGRATION_TABLE;
+pub use sqlite::queries::MIGRATIONS;
+
 // Declared for the lanes that build on this skeleton; nothing here calls them yet.
 use automerge as _;
 use subduction_keyhive as _;
@@ -17,8 +30,11 @@ use subduction_keyhive as _;
 // `keyline` named here and the one `keyline_sqlite` implements are the same crate, so this fails
 // to compile if the two ever resolve to different sources.
 const _: () = {
-    use future_form::{FutureForm, Local, Sendable};
-    use keyhive_codec::traits::{Decode, Encode};
+    use future_form::FutureForm;
+    use future_form::Local;
+    use future_form::Sendable;
+    use keyhive_codec::traits::Decode;
+    use keyhive_codec::traits::Encode;
     use keyline::contract::Keyline;
     use keyline_sqlite::SqliteKeyline;
     use sqlite_rs::SqliteDb;

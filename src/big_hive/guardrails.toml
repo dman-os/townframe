@@ -18,3 +18,6 @@ default_features = true
 features = []
 required_features = []
 default_features = true
+
+[migrations]
+"src/big_hive/sqlite/migrations/001_init.sql" = "916aea1cf4450e1bc10fbd5234997d00865ef7cfc4a39654089c22b41a9d9103"
