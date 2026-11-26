@@ -79,6 +79,11 @@ fn stored(table: &'static str, key: &[u8], source: impl Into<StoredFault>) -> Er
     }
 }
 
+/// A `count(*)` column, which is never negative.
+fn count(ops: i64) -> u64 {
+    u64::try_from(ops).expect("a count is not negative")
+}
+
 fn digest_of<X>(bytes: &[u8]) -> Digest<X> {
     let bytes: [u8; 32] = bytes.try_into().expect("a digest column is 32 bytes");
     Digest::from(bytes)
@@ -264,6 +269,19 @@ impl<T: ContentRef, E: QueryExecutor> Session<'_, T, E> {
             .collect()
     }
 
+    pub async fn count_prekey_ops(&self) -> Result<BTreeMap<IndividualId, u64>, Error> {
+        queries::prekey_op_counts(self.tx)
+            .await?
+            .iter()
+            .map(|row| {
+                let who = Identifier::decode_field(&row.individual_id, "individual_id")
+                    .map(IndividualId::from)
+                    .map_err(|e| stored(PREKEY_OP, &row.individual_id, e))?;
+                Ok((who, count(row.ops)))
+            })
+            .collect()
+    }
+
     pub async fn load_cgka_ops(
         &self,
         doc: DocumentId,
@@ -319,6 +337,19 @@ impl<T: ContentRef, E: QueryExecutor> Session<'_, T, E> {
             }
         }
         Ok(index)
+    }
+
+    pub async fn count_cgka_ops(&self) -> Result<BTreeMap<DocumentId, u64>, Error> {
+        queries::cgka_op_counts(self.tx)
+            .await?
+            .iter()
+            .map(|row| {
+                let doc = Identifier::decode_field(&row.doc_id, "doc_id")
+                    .map(DocumentId::from)
+                    .map_err(|e| stored(CGKA_OP, &row.doc_id, e))?;
+                Ok((doc, count(row.ops)))
+            })
+            .collect()
     }
 
     pub async fn list_documents(&self) -> Result<Vec<DocumentId>, Error> {

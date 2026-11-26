@@ -188,6 +188,10 @@ fn every_statement_is_served_by_an_index() {
         KeyhiveStore::<Local, Ref>::list_individuals(s)
             .await
             .unwrap();
+        KeyhiveStore::<Local, Ref>::count_prekey_ops(s)
+            .await
+            .unwrap();
+        KeyhiveStore::<Local, Ref>::count_cgka_ops(s).await.unwrap();
         KeyhiveStore::<Local, Ref>::load_cgka_ops(s, doc)
             .await
             .unwrap();
@@ -227,6 +231,8 @@ fn every_statement_is_served_by_an_index() {
             queries::KEY_PAIRS_ALL_SQL,
             queries::PENDING_EVENTS_ALL_SQL,
             queries::DEKS_STALE_SQL,
+            queries::PREKEY_OP_COUNTS_SQL,
+            queries::CGKA_OP_COUNTS_SQL,
         ];
         let mut scans = Vec::new();
         let mut plans = BTreeMap::new();
@@ -303,6 +309,17 @@ fn every_statement_is_served_by_an_index() {
                 lines.contains("digest=?") || lines.contains("(doc_id=? AND digest=?)"),
                 "{sql}\n{lines}"
             );
+        }
+        // The counting reads answer for every group, so they read the whole index once, in key
+        // order: the group column leads the key, so no sort and no temporary table.
+        has(queries::PREKEY_OP_COUNTS_SQL, "SCAN kh_prekey_op");
+        has(
+            queries::CGKA_OP_COUNTS_SQL,
+            "SCAN kh_cgka_op USING COVERING INDEX sqlite_autoindex_kh_cgka_op_1",
+        );
+        for sql in [queries::PREKEY_OP_COUNTS_SQL, queries::CGKA_OP_COUNTS_SQL] {
+            let lines = plan_of(sql);
+            assert!(!lines.contains("TEMP B-TREE"), "{lines}");
         }
         // The loose index scans step with a search, never a scan of the operations.
         for sql in [queries::INDIVIDUALS_SQL, queries::DOCUMENTS_SQL] {

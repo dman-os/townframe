@@ -9,6 +9,24 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
 ];
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct CgkaOpCountsRow {
+    pub doc_id: Vec<u8>,
+    pub ops: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for CgkaOpCountsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(CgkaOpCountsRow { doc_id: row.get::<Vec<u8>>("doc_id")?, ops: row.get::<i64>("ops")? })
+    }
+}
+
+pub const CGKA_OP_COUNTS_SQL: &str = include_str!("queries/cgka_op_counts.sql");
+pub async fn cgka_op_counts(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<CgkaOpCountsRow>> {
+    let set = db.query(CGKA_OP_COUNTS_SQL, &[]).await?;
+    set.all()
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CgkaOpIndexOfRow {
     pub digest: Vec<u8>,
     pub predecessor: Option<Vec<u8>>,
@@ -201,6 +219,24 @@ impl crate::sqlite_rs_alias::FromRow for PendingEventsAllRow {
 pub const PENDING_EVENTS_ALL_SQL: &str = include_str!("queries/pending_events_all.sql");
 pub async fn pending_events_all(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<PendingEventsAllRow>> {
     let set = db.query(PENDING_EVENTS_ALL_SQL, &[]).await?;
+    set.all()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrekeyOpCountsRow {
+    pub individual_id: Vec<u8>,
+    pub ops: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for PrekeyOpCountsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(PrekeyOpCountsRow { individual_id: row.get::<Vec<u8>>("individual_id")?, ops: row.get::<i64>("ops")? })
+    }
+}
+
+pub const PREKEY_OP_COUNTS_SQL: &str = include_str!("queries/prekey_op_counts.sql");
+pub async fn prekey_op_counts(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<PrekeyOpCountsRow>> {
+    let set = db.query(PREKEY_OP_COUNTS_SQL, &[]).await?;
     set.all()
 }
 
