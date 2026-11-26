@@ -89,25 +89,36 @@ Moved into the write transaction rather than dropped:
   writes the part-store membership rows in the same transaction. No log walk.
 - **Prekey refill** (today's janitor). It becomes a reaction inside the same write plan.
 
-### Derived-state publishers: the frontier publisher
+### Automerge frontier: published by the Document machine
 
-Not every worker is a state machine. Most are incremental maintainers of derived state: they
-follow a change stream and do idempotent per-key work. Only one of them survives as its own
-actor:
+Not every runtime2 worker is a state machine. Most are incremental maintainers of derived state:
+they follow a change stream and do idempotent per-key work. The automerge frontier (published
+`(doc, heads)`, the primary signal downstream work runs on) needs no worker of its own
+(operator, 2026-11-26):
 
-- **Frontier publisher** (today's frontier worker, critical: published automerge heads are the
-  primary signal downstream work runs on). It follows the sedimentree change feed. For each
-  changed document **we can read**, it hydrates, takes the automerge heads, and publishes
-  `(doc, heads)` in a transaction. A document whose keys have not arrived parks, keyed by
-  document, and wakes when the keyhive epoch for it moves, instead of runtime2's 30 s wait on
-  `await_cgka_ops_count` followed by 1 s retries. Unreadable documents are never hydrated.
-- This is the first user of the **concurrent delta walker** that was deferred from big_sync: a
-  change stream, a durable cursor (watermark), and keyed concurrent work with retry, backoff,
-  park and wake. big_automata's `kit::scheduler` (keyed, with backoff and park/wake, which has no
-  consumer yet) and `kit::watermark` are its building blocks. It is built in big_automata,
-  generic over the stream, not in big_hive.
-- Checkpoint coverage may follow the same pattern (walk keyhive epoch changes per document)
-  instead of living in the Document machine. To decide in the machine design.
+- **Local writes:** the heads after the change are known before commit, so the frontier row goes
+  into the same write plan and commits with the change.
+- **Remote content:** the Document machine already hydrates to materialize it. After applying,
+  it publishes the new heads in a transaction.
+- **Catch-up:** each document keeps `frontier_rev`, the tree `rev` its published heads reflect.
+  A document whose tree `rev` is ahead of its `frontier_rev`, **and which we can read**, is
+  stale. The hub finds stale documents from the change feed (and at startup by query) and wakes
+  their Document machines. Unreadable documents are never hydrated.
+- **Bounded catch-up:** a sync wave can make thousands of documents stale at once. The hub wakes
+  them through a keyed scheduler with a concurrency limit. A document whose keys have not arrived
+  parks, keyed by document, and wakes when its keyhive epoch moves. This replaces runtime2's 30 s
+  wait on `await_cgka_ops_count` and its 1 s retries.
+- The scheduler is big_automata's `kit::scheduler` (keyed, backoff, park/wake; its retry half has
+  no consumer yet) with `kit::watermark` for the feed cursor. This is the part of the deferred
+  concurrent delta walker that big_hive needs. It lives in the hub's policy, not in a separate
+  actor. A shared publisher would only buy batching several documents' heads into one
+  transaction, which the hub can do as well.
+- Checkpoint coverage can follow the same wake pattern (keyhive epoch moves for a document).
+
+**big_sync's payload** is not affected. It already carries **sedimentree** heads, minted by
+storage in the commit transaction (`big_repo/store/sqlite/sedimentree.rs:787-803`, `tree.heads`),
+so it works on relays without keys. big_repo only encodes them through automerge's `ChangeHash`
+type, a pun to remove in big_hive.
 
 ## 5. Messages between actors
 
@@ -198,13 +209,15 @@ The design must make the simulation (section 2 of the order) possible:
    subduction over an in-memory transport on the seeded executor, which is deterministic only if
    subduction spawns nothing of its own, or remote sync is modelled at the `Storage` boundary
    (remote commits arrive as storage writes). To check: what subduction spawns.
-2. **Keyhive calls are async** (internal async mutexes), even after explicit hydration. On the
-   seeded executor that is fine. On a multi-threaded runtime the Keyhive boundary is one
-   actor, so keyhive work is serialized. Measure whether that becomes the bottleneck for
-   encryption.
+2. **Keyhive calls are IO-like commands.** As in runtime2, where `DocIo` methods implemented in
+   `native.rs` wrap keyhive and subduction, encryption and decryption run in the driver, not
+   in a machine. The Keyhive boundary's driver may run independent calls concurrently and, on a
+   multi-threaded runtime, on other threads, because keyhive locks per document internally.
+   Only membership and ingest take the exclusive lock. What changes from runtime2 is that
+   decisions inside those IO methods (persist order, checkpoint writes, retries) move into
+   machines, and the IO surface narrows to plain calls.
 3. **Window sizes** per actor pair, and whether a document should refuse new writes (back off
    the caller) when its held-write queue is full.
-4. **Automerge heads for consumers:** settled (operator, 2026-11-26). The frontier publisher
-   keeps publishing them, hydrating only documents we can read (section 4). Whether big_sync's
-   "heads equal, nothing to do" shortcut keeps using automerge heads or moves to sedimentree
-   heads is still to decide.
+4. **Automerge heads for consumers:** settled (operator, 2026-11-26). The Document machine
+   publishes them, hydrating only documents we can read (section 4). big_sync already uses
+   sedimentree heads.
