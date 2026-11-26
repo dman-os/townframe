@@ -225,12 +225,62 @@ The design must make the simulation (section 2 of the order) possible:
 - The oracle for the whole runtime: the set of committed plans, and what each document's readers
   may see given Keyline at each point.
 
+## 10. The simulation harness
+
+Modelled on `big_automata::sync::peer::sim` (ops, scenarios, checks, determinism, `SIM_TRACE`).
+Law zero is the same: **a seed replays**, or a failure the simulation finds cannot be reproduced.
+
+### Three tiers
+
+| Tier | What runs | Determinism | Cost |
+|---|---|---|---|
+| 1. Machine simulations | one machine (Hub, Document, Write coordinator, Keyhive boundary) with fake neighbours and a fake store, the way the peer sim fakes the backend and the peer | full | cheap: many seeds per run |
+| 2. Whole-hive simulation | several hives, each with every machine and driver, real SQLite and real keyhive, over a simulated network, on one seeded executor | full, if subduction can be made deterministic (below) | moderate |
+| 3. Acceptance | the ported big_repo end-to-end suite over real iroh and subduction | none | expensive: a subset per PR |
+
+### What tier 2 models
+- **Executor:** every driver loop on one single-threaded executor whose task order comes from
+  the seed. Subduction's spawns go through its injected spawner, so they land on the same
+  executor (`connection/manager.rs:351`, `handler/sync.rs:309` take a `spawner`).
+- **Storage:** real SQLite per hive, wrapped so the seed decides when each call completes and
+  can inject `Failed` (and a trap).
+- **Network:** every message between hives is a simulation message. Ops deliver any message
+  (reorder, delay), drop one (`Lost`), duplicate one, or disconnect a pair.
+- **Time:** a virtual clock for machines (`now`, `next_due`) and for subduction's timeout
+  effect.
+- **Crashes:** at a `Commit` outcome, before or after the transaction lands. A crash drops every
+  machine, cache and in-memory keyhive and keeps the database; the hive restarts and its
+  embedder re-adds interest.
+- **Ops:** local single- and multi-document writes; membership changes (add, revoke,
+  re-add); remote writes on other hives; key arrivals delayed relative to content; handle
+  drops; peer restarts; crashes; clock jumps.
+
+### Checks
+- **After every step:**
+  - no reader sees uncommitted state: a document's live state equals the committed rows for it;
+  - per-document write order is preserved;
+  - every multi-document plan is all-or-nothing in the database;
+  - `frontier_rev` never exceeds the tree `rev`;
+  - a parked document has a reason that still holds (its keys are missing);
+  - in-flight calls are within each machine's windows;
+  - no mailbox overflows.
+- **After a quiet drain** (reliable network, no writes): every readable document's frontier is
+  current, every content want has landed, and every pair of hives agrees on each document they
+  may both read. Then every case crashes, restarts and drains again.
+- **Oracle:** the set of committed plans and Keyline's answers at each point, giving what each
+  hive's readers may see.
+
+### To verify before building tier 2
+`subduction_core` still reads `std::time::Instant::now` in `connection/manager.rs:459,471` and
+`metrics.rs`, and `multiplexer.rs` uses `tokio::time::timeout`. If those only feed metrics or
+tests, the seeded executor is enough. If they decide behaviour, we either inject a clock in our
+fork (an upstreamable change) or tier 2 models remote sync at the `Storage` boundary (remote
+commits arrive as storage writes) instead of running real subduction.
+
 ## Open questions
 
-1. **Subduction in the simulation.** Subduction is not sans-IO. Either the simulation runs real
-   subduction over an in-memory transport on the seeded executor, which is deterministic only if
-   subduction spawns nothing of its own, or remote sync is modelled at the `Storage` boundary
-   (remote commits arrive as storage writes). To check: what subduction spawns.
+1. **Subduction in the simulation.** It spawns through an injected spawner, which suits a seeded
+   executor. Its remaining clock reads are listed in section 10 and still need checking.
 2. **Keyhive calls are IO-like commands.** As in runtime2, where `DocIo` methods implemented in
    `native.rs` wrap keyhive and subduction, encryption and decryption run in the driver, not
    in a machine. The Keyhive boundary's driver may run independent calls concurrently and, on a
