@@ -215,6 +215,19 @@ fn is_reserved_attribute_name(name: &str) -> bool {
         && !GUEST_WRITABLE.contains(&name)
 }
 
+/// Whether the guest wire admits a static element `tag` in `namespace` (a custom element is
+/// not a static tag). The component kit's test harness asks this instead of keeping its own copy
+/// of the vocabulary, so a component that steps outside what the host admits fails its test.
+pub fn admits_element(tag: &str, namespace: Option<&str>) -> bool {
+    supported_tag(tag, namespace)
+}
+
+/// Whether the guest wire admits an attribute `name` with no namespace: the static vocabulary
+/// and any well-formed `data-*` name that is not host-owned. Same use as [`admits_element`].
+pub fn admits_attribute(name: &str) -> bool {
+    matches!(static_attribute(&DATA_ATTRIBUTES, name, None), Ok(Some(_)))
+}
+
 /// Resolves a wire attribute to the names Dioxus needs. `Ok(None)` is an unsupported name;
 /// `Err` means a well-formed new `data-*` name would exceed the interner's bound.
 pub(crate) fn static_attribute(

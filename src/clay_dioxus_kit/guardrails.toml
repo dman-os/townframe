@@ -2,6 +2,9 @@ version = 1
 role = "foundation"
 dependency_reason = "the component kit links into native, browser and wasm guest micros alike, so it sits at the bottom of the UI stack: Dioxus and design tokens only, never a backend or a renderer"
 allowed_dependencies = [
+    # Dev-dependency only: the test harness asks clay_surface what the guest wire admits (KIT-053)
+    # instead of keeping a second copy of the vocabulary. Nothing in the shipped kit links it.
+    "clay_surface",
     "dioxus_storm",
 ]
 # Every public prop is a Dioxus type (`Element`, `EventHandler`): the kit is a Dioxus library.
