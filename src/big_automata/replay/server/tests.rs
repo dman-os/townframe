@@ -51,6 +51,7 @@ fn round(session_id: SessionId, targets: &[(TargetId, Rev)]) -> PageSession {
         targets: targets.to_vec(),
         limit: 100,
         hold_ms: 0,
+        linger_ms: None,
     }
 }
 

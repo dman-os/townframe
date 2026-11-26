@@ -62,6 +62,20 @@ pub fn rev_to_sql(rev: Rev) -> i64 {
     i64::try_from(rev).expect("a rev fits SQLite's integer")
 }
 
+/// A rev used as a *bound* of a read (`since`, `until`, a route's lower bound), as opposed to a
+/// rev a row is stamped with.
+///
+/// Revs are `u64`, SQLite integers are `i64`, and [`rev_to_sql`] panics on a rev that does not
+/// fit: right for a stamp, since the store only ever mints revs it can store. A bound is
+/// different. The replay admission passes `Rev::MAX` as `since` to mean "no dirt wanted, only
+/// whether the part is readable", and a bucket list may be asked from past every row. Every
+/// stored rev is at most `i64::MAX`, so `rev > i64::MAX` selects nothing, exactly as `rev >
+/// Rev::MAX` would, and saturating gives the same answer the in-memory store computes by
+/// comparison.
+pub fn rev_bound(rev: Rev) -> i64 {
+    i64::try_from(rev).unwrap_or(i64::MAX)
+}
+
 pub fn rev_from_sql(rev: i64) -> Rev {
     Rev::try_from(rev).expect("a stored rev is not negative")
 }

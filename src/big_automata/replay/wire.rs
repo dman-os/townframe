@@ -59,6 +59,11 @@ pub struct PageSession {
     pub limit: u32,
     /// How long the server may wait for rows when none of the targets has any.
     pub hold_ms: u32,
+    /// How long the server may keep a held round open after the first row that concerns it
+    /// arrives, to answer a burst as one page (like Kafka's `fetch.max.wait.ms`): a hint from
+    /// the client, which knows whether it is latency sensitive. The server caps it and never
+    /// lingers past `hold_ms`. `None` is no linger: the round answers as soon as it has a row.
+    pub linger_ms: Option<u32>,
 }
 
 /// The answer to a [`PageSession`].

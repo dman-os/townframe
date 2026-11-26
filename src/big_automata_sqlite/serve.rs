@@ -203,7 +203,7 @@ pub async fn part_summaries(
             summaries.push(None);
             continue;
         }
-        let since = sql::rev_to_sql(*since);
+        let since = sql::rev_bound(*since);
         let member_changes = queries::part_member_changes(x, part.blob(), since).await?;
         let access_rev = queries::access_rev(x, part.blob(), principal.blob()).await?;
         summaries.push(Some(PartSummary {
@@ -245,7 +245,7 @@ pub async fn bucket_list(
         part.blob(),
         buck_raw(from),
         buck_raw(last),
-        sql::rev_to_sql(since),
+        sql::rev_bound(since),
         sql::limit(limit),
     )
     .await?;

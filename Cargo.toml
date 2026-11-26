@@ -394,6 +394,11 @@ ui = { path = "./src/ui" }
 #
 
 [patch.crates-io]
+# hyper 1.12.0 plus a fix: the h1 server refreshed its cached Date value on every connection even
+# with `auto_date_header(false)`, and the refresh reads `SystemTime::now()`, which panics on
+# wasm32-unknown-unknown, so a browser node could not serve HTTP/1. The fix skips the refresh when
+# the header is off. Branch townframe/skip-date-when-disabled; the upstream PR is not opened yet.
+hyper = { git = "https://github.com/dman-os/hyper", rev = "388ad2634fe3a61d350690e02826ef021ced7458" }
 wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }

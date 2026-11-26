@@ -1,8 +1,15 @@
 version = 1
 role = "runtime"
 dependency_reason = "Service hosting and lifecycle management implement service-core contracts and reuse service-client transports."
-allowed_dependencies = ["method_core", "service_client_core_rs", "service_client_iroh_rs", "service_client_native_rs", "service_core_rs"]
+# `service_utils_rs` is its own dev-dependency: the tests serve over TCP and Unix sockets, so they
+# need the `net` feature that a plain `cargo test` of the portable core does not enable.
+allowed_dependencies = ["method_core", "service_client_core_rs", "service_client_iroh_rs", "service_client_native_rs", "service_core_rs", "service_utils_rs"]
 allow_external_api_types = false
 
 [builds.native]
+features = ["iroh-http", "net"]
+
+# The portable core: hosts, admission, the XRPC router and the iroh protocol handler, so a
+# browser node can serve a service to its peers. TCP and Unix serving (`net`) are native extras.
+[builds.wasm32-unknown-unknown]
 features = ["iroh-http"]

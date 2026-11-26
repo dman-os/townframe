@@ -11,6 +11,10 @@ path = "lib.rs"
 
 [features]
 default = []
+# Serving over TCP and Unix sockets: tokio's `net` and runtime and hyper-util's tokio adapters,
+# none of which has a browser build. Without it the crate is the portable core (hosts, router,
+# admission, the iroh handler) and builds for wasm32.
+net = ["tokio/net", "tokio/rt", "hyper-util/tokio"]
 # HTTP/1 XRPC served over Iroh connections, in addition to TCP.
 iroh-http = [
   "dep:iroh",
@@ -27,17 +31,24 @@ service_client_iroh_rs = { workspace = true, optional = true }
 #
 # async
 futures.workspace = true
-tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
+# Channels, watch, `select!` and the I/O traits; spawning and timers are n0-future's. `rt` is
+# only what `task_local!` and tokio-util's `TaskTracker` are gated on: nothing here starts a
+# tokio runtime or task.
+tokio = { workspace = true, features = ["sync", "macros", "rt", "io-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
+n0-future.workspace = true
+async-lock.workspace = true
 irpc.workspace = true
 
 #
 # http
-axum = { workspace = true, default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { workspace = true, default-features = false, features = ["http1", "json", "query"] }
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["server", "tokio"] }
+hyper-util = { version = "0.1", features = ["service"] }
 mime = "0.3"
-iroh = { workspace = true, optional = true }
+# No default features, as in `service_client_iroh_rs`: they pick a native TLS provider. Whoever
+# builds the `Endpoint` picks its provider.
+iroh = { version = "1", default-features = false, optional = true }
 
 #
 # encoding
@@ -53,6 +64,9 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The tests serve over TCP and Unix sockets and call through the HTTP client.
+service_utils_rs = { path = ".", features = ["net"] }
+service_client_native_rs = { workspace = true, features = ["xrpc"] }
 url.workspace = true
 tempfile.workspace = true
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }

@@ -70,3 +70,24 @@ test("a browser endpoint accepts dials from native and from another browser", as
   expect(acceptorFailures).toEqual([]);
   expect(dialerFailures).toEqual([]);
 });
+
+// The reverse of the first test: the page serves big_automata (the real replay and sync rpc
+// service over its part store) through the relay, and the native fixture's `PeerDriver` pulls
+// part 1 from it. `?mode=serve` publishes its endpoint id once its home relay is connected.
+test("a native peer pulls a part from the browser host over iroh", async ({
+  page,
+  request,
+}) => {
+  const failures = watchFailures(page);
+  await page.goto("/?mode=serve");
+  await expect(page.locator("#node_id")).toHaveText(/^[0-9a-f]{64}$/, {
+    timeout: 60_000,
+  });
+  const nodeId = (await page.locator("#node_id").textContent())!;
+  const served = Number(await page.locator("#served").textContent());
+  expect(served).toBeGreaterThan(1);
+
+  const pulled = await request.post(`/pull/${nodeId}`, { timeout: 60_000 });
+  expect(await pulled.text()).toBe(`synced ${served}`);
+  expect(failures).toEqual([]);
+});

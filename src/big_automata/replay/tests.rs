@@ -285,6 +285,7 @@ impl Sim {
             |route| Some(cursors.get(route).copied().unwrap_or(0)),
             PAGE_LIMIT,
             HOLD_MS,
+            None,
         );
         if let Some(request) = request {
             for (id, _) in &request.targets {

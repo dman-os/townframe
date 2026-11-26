@@ -409,6 +409,7 @@ impl ReplayClient {
         mut cursor_of: impl FnMut(&Route) -> Option<Rev>,
         limit: u32,
         hold_ms: u32,
+        linger_ms: Option<u32>,
     ) -> Option<PageSession> {
         let targets: Vec<_> = self
             .acked
@@ -420,6 +421,7 @@ impl ReplayClient {
             targets,
             limit,
             hold_ms,
+            linger_ms,
         })
     }
 

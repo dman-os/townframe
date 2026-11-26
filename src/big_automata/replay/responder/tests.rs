@@ -187,6 +187,7 @@ impl Fixture {
             targets: targets.to_vec(),
             limit: 100,
             hold_ms,
+            linger_ms: None,
         };
         let Self {
             server,
@@ -488,6 +489,7 @@ fn a_round_the_server_rejects_is_answered_with_its_error() {
         targets: vec![(7, 0)],
         limit: 100,
         hold_ms: 1_000,
+        linger_ms: None,
     };
     let Fixture {
         server,

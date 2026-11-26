@@ -23,6 +23,7 @@ mod cursors;
 mod invariants;
 mod okv;
 mod plans;
+mod stress;
 
 pub(crate) type Store = SqlitePartStore<Database>;
 
@@ -88,6 +89,7 @@ store_laws!(
     object_routes_follow_the_readable_parts,
     revocation_hides_the_parts_buckets,
     an_empty_window_reads_verdicts_only,
+    a_since_past_every_row_reads_nothing_changed,
     authorized_reads_carry_their_payloads,
     grant_returns_the_backlog,
     removals_reach_every_route_above_its_bound,

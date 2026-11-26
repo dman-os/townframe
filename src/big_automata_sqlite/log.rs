@@ -85,7 +85,7 @@ async fn fetch(
     if lo >= hi {
         return Ok(Vec::new());
     }
-    let (lo, hi, limit) = (sql::rev_to_sql(lo), sql::rev_to_sql(hi), sql::limit(limit));
+    let (lo, hi, limit) = (sql::rev_bound(lo), sql::rev_bound(hi), sql::limit(limit));
     Ok(match arm {
         Arm::AllMembers => queries::all_member_rows(x, lo, hi, limit)
             .await?

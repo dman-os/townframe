@@ -24,6 +24,8 @@ pub(super) fn obj_route(index: u8) -> Route {
 pub(super) fn config() -> Config {
     Config {
         hold_ms: 300,
+        live_linger_ms: Some(20),
+        bulk_linger_ms: None,
         live_limit: 2,
         bulk_batch: 1,
         bulk_linger: Duration::from_secs(1),
@@ -397,6 +399,25 @@ fn law_4_a_live_round_may_hold() {
     rig.ack(obj_route(1));
     let out = rig.flush();
     assert_eq!(rig.round_of(&out, Lane::Live).unwrap().2.hold_ms, 300);
+}
+
+#[test]
+fn law_4_a_live_round_sends_the_live_linger_hint() {
+    let mut rig = Rig::new();
+    rig.ack(obj_route(1));
+    let out = rig.flush();
+    assert_eq!(
+        rig.round_of(&out, Lane::Live).unwrap().2.linger_ms,
+        Some(20)
+    );
+}
+
+#[test]
+fn law_4_a_bulk_round_sends_no_linger_hint() {
+    let mut rig = Rig::new();
+    rig.ack(part_route(1));
+    let out = rig.flush();
+    assert_eq!(rig.round_of(&out, Lane::Bulk).unwrap().2.linger_ms, None);
 }
 
 #[test]

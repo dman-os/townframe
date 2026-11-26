@@ -85,6 +85,10 @@ decision is made or a finding turns up. Findings go here, not only in chat.
   the live-object property. Remote commits arriving over subduction already skip the doc
   worker; they're a pure storage operation (`hub.rs:2957`: no materialization retry without an
   existing worker).
+  **Correction (2026-11-26, big-repo-port-ledger §2):** that holds only for CGKA notifications.
+  Remote *content* from a sync session is routed to a doc worker that is spawned lazily if none
+  exists (`route_sync_session_apply`, `hub.rs:2356-2380`). On writable nodes it hydrates, and it
+  may mint checkpoints (`doc_worker.rs:1508`).
 - 2026-11-17: **Multiple principals per connection: next week.** The operator is talking to
   upstream. This week has no bandwidth to reach Keyline.
 - 2026-11-17: The lane owns its stack. Pushing needs no permission. No attribution trailers.
@@ -1056,3 +1060,134 @@ claytxt #344), on nodules' ping. Design and audit: `docs/scratch/service-macro-r
     when big_node is made to work on the web.
   - Re-audit UUID use once big_automata and big_sync are done. That builds on
     `docs/scratch/uuid-audit.md`, and the sim's random store generations were the latest instance.
+
+### Design thread: a key-value datum face for the cabinet (operator, 2026-11-25)
+
+Today's runtime optimises for live automerge objects behind workers and mutexes, but big_cabinet
+uses automerge as a key-value store. The direction to evaluate is that `big_repo::runtime`
+offers two faces:
+- **Document face:** the live automerge object, for whatever needs CRDT editing (text, lists,
+  conflict surfacing). It hydrates.
+- **Datum face:** shaped like a key-value store, for the cabinet.
+  - **Reads** come from a projection of datum values keyed by `(doc, heads)`. It is written in
+    the same SQL transaction as each commit, so a read at current heads never hydrates.
+  - **Writes** are a batch of key→value puts and deletes across N documents, in one transaction.
+
+Writing an automerge change needs `pred` (the op IDs it overwrites) and the deps (heads). If the
+projection also stores each key's current op IDs, a put could be encoded as a change without
+hydrating. Whether automerge's public Rust API allows that, or it needs internals or a fork, is
+the first feasibility question; it is in the big_repo port ledger. If writes must hydrate, the
+face still removes hydration from reads, and writes hydrate only the documents they touch,
+inside the transaction. This ties together:
+- hydration time;
+- the doc worker's live-object property, which is up for sacrifice (Decisions, 2026-11-17);
+- the transaction design.
+
+## 2026-11-26: service rework, cut A item from the operator via nodules
+- `service_core_rs/xrpc.rs` names nodule specifics in six consts: `NODULE_CAPABILITY_HEADER`,
+  `NODULE_CONFIG_DOC_HEADER`, `NODULE_CONFIG_CAPABILITY_HEADER`, `NODULE_DRAWER_CAPABILITY_HEADER`,
+  `NODULE_BLOBS_CAPABILITY_HEADER`, `NODULE_ACTOR_CAPABILITY_HEADER`. They carry the per-request
+  authority the nodule host hands a guest. Consumers are `big_ndk` (`cx.rs`) and `big_nodule`
+  (`wire.rs`, `egress.rs`, e2e). Catalog: `docs/scratch/protocol-headers-catalog.md` on
+  `stack/node-103-topology`.
+- Goal: generic service code stops naming nodules.
+- Shape (lead's proposal):
+  - a tiny contract crate, e.g. `nodule_wire`, that owns the header names together with a typed
+    `GuestAuthority` (encode to and decode from request metadata);
+  - `service_core_rs` keeps only a generic, protocol-agnostic way to carry named request
+    metadata;
+  - `big_ndk`'s guardrails allow the contract crate.
+
+  Header string values stay the same, so it's no wire change and belongs in cut A. Revisit
+  whether the cut B `protocol!` block can declare such metadata slots per protocol.
+
+## 2026-11-26: big_repo direction (operator)
+- **No key-value datum projection in big_repo.** If one ever happens, it lives in big_cabinet's
+  datum-set index. big_repo offers "commit these change bytes across N docs in one transaction";
+  the cabinet keeps any metadata it wants.
+- **All write-path findings** (big-repo-port-ledger §2: in-memory mutation before durability,
+  per-event transactions, the CGKA op event firing before it is durable, the sequential
+  persist loop) **must be resolved** by the new runtime.
+- **Read-time authorization is ours.** `subduction_keyhive/src/policy.rs` on `keyline-take-2`
+  says whether an author's write counts "is the materializer's decision, made at read time".
+  Subduction only checks the requestor holds at least Relay.
+- **Keyline storage.** Upstream ships only `MemoryKeyline`, which persists through keyhive's event
+  log and archives and replays them on load. Its design doc says relays want a materializing
+  database backend, so our SQL Keyline is the intended kind of backend.
+- **Checkpointing vs invitations.** keyhive #262 (a CGKA Add wraps an Invitation sealing root
+  secrets) may make most causal checkpoints unnecessary. Uncovered concurrent epochs may still
+  need one. Verify with a test during the port. If invitations suffice, remote content stops
+  hydrating without a handle (`reconcile_causal_coverage`, `doc_worker.rs:1508`).
+- **Memory before disk in subduction_keyhive** (ingest into in-memory keyhive, then persist;
+  recovery is sender retry plus startup full-projection reconciliation) is deliberate upstream.
+  Raise it once our SQL Keyline offers a persist-then-apply alternative.
+- **For big_cabinet:**
+  - explore clients holding the Automerge doc and sending change bytes; the node verifies,
+    encrypts and commits, and adds a dmeta-signature commit on top;
+  - stream unsigned keystroke changes to live watchers over ephemeral messages
+    (`subduction_ephemeral`), and sign and commit once on a debounce.
+- **dmeta signatures as map entries keyed by signer, instead of a list:** a cabinet decision.
+  Only needed if the cabinet wants hydration-free writes.
+
+### big_repo: operator answers (2026-11-26)
+- **Mutating the live Automerge before disk is the samod design** (the Automerge doc is the
+  write object), so we keep it. Today:
+  - `with_document_with_origin` releases its sync lock before `commit_delta` persists
+    (`lib.rs:1607-1665`);
+  - the handle breaks only on a no-write-access rejection, a key-unavailable rejection or a
+    dropped worker. A plain persistence failure leaves the change in memory without breaking.
+
+  Improve within the design: break the handle on any persistence failure, or hold the per-doc
+  write until it is durable.
+- **The SQL Keyline fixes the authority-graph half of in-memory keyhive state.** BeeKEM/CGKA
+  state and encrypt-time app keys still need a prepare/apply-after-commit split in our keyhive
+  fork.
+- **The `CgkaOp` listener event** has one consumer, the hub (`hub.rs:2207`): it notifies the
+  change manager of a key rotation and retries materialization on an existing worker. It fires
+  before the op is durable. `notify_document_key_rotated(..).inspect_err(warn).ok()` swallows
+  the error, which AGENTS.md forbids. The FIXME at `hub.rs:2205` (one rotation may be several
+  ops) is relevant to the rework.
+- **Ephemeral live-change stream:** unsigned changes never enter subduction and are never
+  encrypted as commits. Other nodes use the stream only for live watching and treat its changes
+  as retractable.
+- **Read-time authorization** is automerge's path: filtered materialization by actor id, which
+  the automerge authors are building.
+- **automerge 0.12:** port `dman-os/townframe#54` ("refactor: automerge 0.12 and authors") in
+  this lane as part of the big_repo rewrite.
+- **SQL Keyline:** build it, and possibly contribute it upstream.
+- **Scalar dmeta signatures:** deferred.
+- **Study in progress:** upstream keyhive/automerge-repo integration, checkpointing ("nudge
+  edits"), author-filtered materialization, and automerge main since 0.11.
+- **Reads can see non-durable writes (operator: "a big flaw", 2026-11-26).** The sync lock covers
+  only the mutation, so a reader sees a change before it is durable, and keeps seeing it if the
+  persist fails.
+  - **Fix: persist, then apply.** Build the change in a transaction, take its bytes, roll back,
+    persist (encrypt, CGKA, store), and only then `apply_changes` to the live doc under the lock.
+    The cabinet's dry-run (`write.rs:108-136`) already does half of this. `Failure::Ambiguous`
+    disappears.
+  - **CGKA:** ops and secrets are already in SQLite (keyhive event log, `secret_blobs`). The
+    defect is ordering: apply in memory, then persist one transaction per event. Same fix: a
+    keyhive "prepare an op" API with no mutation, persist the op and secret in the write
+    transaction, apply after commit.
+- **Checkpoints without hydration (an obvious optimization).** A checkpoint concerns keys and
+  heads, not content. Settle whether its parents must be automerge heads or can be sedimentree
+  heads; the study lane covers upstream.
+- **Queued: upgrade surelock and survey its new release** (operator, 2026-11-26). It now ships
+  async mutexes. **Not authorized for use** until we know whether they have the futurelock
+  problem (a guard held by a future parked in `select!`/`FuturesUnordered` blocks every other
+  waiter). Survey the other additions as well.
+
+### Upstream-support work before big_repo (operator, 2026-11-26)
+- **SQL Keyline:** crate `keyline_sqlite` in townframe, on `sqlite_rs`. It implements
+  upstream's `Keyline` trait, plus an insert inside an already-open transaction, and is checked
+  against upstream's conformance suite and differentially against `MemoryKeyline`. In progress.
+- **CGKA prepare/apply** in our keyhive fork (`keyline/townframe`). The lane first writes a repro
+  for the concurrent-epoch gap. In progress.
+- **Gap: `sqlite_rs` has no browser backend.** It has native and `wasm32-wasip3` (host SQLite
+  over `townframe:sqlite`) only, so `big_automata_sqlite` and `keyline_sqlite` don't run in the
+  browser. That contradicts "nothing native-only". Add a wasm32-unknown-unknown backend (SQLite
+  on OPFS, synchronous access handles in a dedicated worker) as part of the planned
+  `sqlite_rs` → `sqlite_utils_rs` rename. **Timing (operator):** done when big_repo goes to
+  the browser, not before.
+- **ARK issue draft** about the concurrent-epoch gap left by #24's nudge-edit removal: file it
+  after the repro confirms the gap.

@@ -115,6 +115,11 @@ fn an_empty_window_reads_verdicts_only() -> Res<()> {
 }
 
 #[test]
+fn a_since_past_every_row_reads_nothing_changed() -> Res<()> {
+    block_on(laws::a_since_past_every_row_reads_nothing_changed(&Memory))
+}
+
+#[test]
 fn authorized_reads_carry_their_payloads() -> Res<()> {
     block_on(laws::authorized_reads_carry_their_payloads(&Memory))
 }

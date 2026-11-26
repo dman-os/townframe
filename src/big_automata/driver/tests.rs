@@ -13,3 +13,4 @@ mod laws;
 mod mutual;
 mod reconnect;
 mod rig;
+mod shared_writer;
