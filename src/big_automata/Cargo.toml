@@ -1,0 +1,47 @@
+[package]
+name = "big_automata"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["automerge"]
+automerge = ["dep:autosurgeon"]
+
+[dependencies]
+utils_rs = { workspace = true, features = ["hash"] }
+
+structstruck.workspace = true
+
+#
+# os
+rand.workspace = true
+
+#
+# error
+thiserror.workspace = true
+
+#
+# async
+# tokio-util.workspace = true
+async-channel.workspace = true
+async-trait.workspace = true
+future_form.workspace = true
+
+#
+# encoding
+blake3.workspace = true
+bs58.workspace = true
+serde.workspace = true
+autosurgeon = { workspace = true, optional = true }
+siphasher.workspace = true
+ciborium.workspace = true
+
+#
+# logging
+tracing.workspace = true
