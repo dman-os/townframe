@@ -277,6 +277,67 @@ tests, the seeded executor is enough. If they decide behaviour, we either inject
 fork (an upstreamable change) or tier 2 models remote sync at the `Storage` boundary (remote
 commits arrive as storage writes) instead of running real subduction.
 
+## 11. The Document machine (draft)
+
+One per document with a handle, an interest, or catch-up work. It replaces runtime2's doc worker
+(`DocWorkerMsg`: `PutDoc`, `AcquireInterest`, `AcquireHandle`, `CommitDelta`,
+`ApplySyncSession`, …) and owns the live automerge document.
+
+### State
+- **Phase:** `Cold` (no live doc) → `Hydrating { call }` → `Live { doc, applied_rev }`, or
+  `Parked { missing }` when content cannot be decrypted yet.
+- **Writes:** at most one commit in flight; later writes held in order. While the document is
+  prepared for a multi-document plan, writes are held too.
+- **Remote content:** `known_rev` (the newest tree `rev` the hub reported) against `applied_rev`;
+  refs that are blocked on keys.
+- **Frontier:** `frontier_rev`, the tree `rev` the published heads reflect.
+- **Lifetime:** handle and interest counts, a generation that handles carry, an idle deadline.
+
+### Inputs
+- From handles: `opened`, `handle_dropped`, `interest(+/-)`, `write { call, op }` where `op`
+  builds a change against a transaction (user code runs inside the machine's step: synchronous
+  CPU work, no IO), `read { call, op }` against the live doc.
+- From the hub: `tree_changed { rev }` (the change feed), `epoch_moved` (the keyhive epoch for
+  this document moved).
+- From the coordinator: `prepare { plan, op }`, `apply { plan }`, `abort { plan }`.
+- Outcomes: `hydrated`, `decrypted`, `encrypted` (prepared encryption), `committed`.
+
+### Commands
+- `Hydrate`: the driver reads the committed commits and keys, decrypts through the Keyhive
+  boundary, and returns automerge changes. Only for documents we can read.
+- `PrepareEncrypt { change }` to the Keyhive boundary.
+- `Commit { plan }` for a single-document write: commit rows, content key, any CGKA rows, and
+  **the frontier row** (the heads after the change are known before commit).
+- `Prepared { plan, change }` to the coordinator.
+- `Reply { call, result }` to a handle; `Notify` to change listeners after an apply.
+- `PublishFrontier { heads, rev }` after materializing remote content.
+
+### Laws (to test against an oracle that holds the committed changes per document)
+1. **Live equals committed.** The live document contains exactly the committed changes it has
+   applied. Nothing is applied before `Committed`. A failed or aborted write leaves it unchanged.
+2. **Per-document order.** Writes apply in submission order, and each is built on the committed
+   state that includes every earlier write.
+3. **Read your writes.** A handle whose write returned sees that write.
+4. **Plans hold the document.** While prepared for a plan, no other write is prepared or
+   committed on this document; on `apply` or `abort` the held writes resume in order.
+5. **Frontier.** `frontier_rev ≤ applied_rev ≤ known_rev`. A local write publishes its frontier in
+   its own commit. Remote content publishes once applied. A readable document is never left with
+   `frontier_rev < known_rev` and nothing in flight or parked.
+6. **Parked means blocked.** A parked document lacks keys for some content, and leaves `Parked`
+   on `epoch_moved` by trying again.
+7. **Eviction.** Only with no handles, no interest, nothing in flight and nothing held. Evicting
+   loses nothing, because everything live is committed.
+8. **Unreadable documents are never hydrated.**
+
+### Open, for the operator
+- **Author filtering at read time** (automerge 0.12 author APIs): remote changes from an author
+  without Edit at that point are filtered during materializing. Where the filter sits (in
+  `Hydrate`, or in the machine over decrypted changes) depends on the 0.12 API.
+- **Write pipelining:** one commit in flight per document is simple and gives law 2 for free.
+  Pipelining (prepare the next write on top of an uncommitted one) would raise throughput, but
+  an earlier failure must then abort every later write. Start without it.
+- **Checkpoint coverage:** inside this machine on `epoch_moved`, or its own wake through the hub.
+
 ## Open questions
 
 1. **Subduction in the simulation.** It spawns through an injected spawner, which suits a seeded
