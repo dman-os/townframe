@@ -7,40 +7,29 @@
 //!
 //! # Claude Code hooks
 //!
-//! `day x intxt capture` is the command of every hook ADR 039 §4 lists. In `.claude/settings.json`
-//! (or the user's `~/.claude/settings.json`):
+//! `day x intxt record install claude-code` writes the hooks that record Claude Code sessions
+//! (ADR 039 §4) into `./.claude/settings.json`, or `~/.claude/settings.json` with `--user`;
+//! `--dry-run` prints the resulting JSON and writes nothing. Each recorded event gets a
+//! `{ matcher?, hooks: [{ type: "command", command: "intxt record hook" }] }` entry whose command
+//! reads the hook's JSON on stdin. The install merges into what is there: every other key and
+//! hook is kept, an identical entry is not added twice, and an older `day x intxt capture` entry
+//! is updated in place. Malformed JSON is an error that names the file, and the file is
+//! never overwritten. The hooks call `intxt`, the name `day` answers to when linked as `intxt`
+//! (`ln -s "$(command -v day)" ~/.local/bin/intxt`; `day-intxt` likewise makes `day intxt` work); the install says so when either is not on
+//! the `PATH`. Add `--node <dir>` (or set `DAY_NODE`) to a hook's command to name the node, and
+//! `"timeout"` to a hook if a recording can take long. The command needs the node's server (`day
+//! node start --bg`) and fails fast without one: booting the node in each hook's process would take
+//! seconds, and parallel tool calls run parallel hooks. The configuration's shape was checked
+//! against Claude Code's hooks documentation (code.claude.com/docs/en/hooks).
 //!
-//! ```json
-//! {
-//!   "hooks": {
-//!     "SessionStart":       [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "PreToolUse":         [{ "matcher": "*", "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "PostToolUse":        [{ "matcher": "*", "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "PostToolUseFailure": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "Stop":               [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "SubagentStop":       [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "PreCompact":         [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
-//!     "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }]
-//!   }
-//! }
-//! ```
-//!
-//! This shape (event name, a list of `{ matcher?, hooks: [{ type, command }] }`, the hook's JSON on
-//! the command's stdin) is written from memory of Claude Code's hooks documentation and has not
-//! been checked against it here; verify it before relying on it. Add `--node <dir>` (or set
-//! `DAY_NODE`) to name the node, and `"timeout"` to a hook if a recording can take long. The
-//! command needs the node's daemon (`day node start`) and fails fast without one: booting the
-//! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
-
 //! # git's `post-rewrite` hook
 //!
 //! The first time capture records a clone it installs git's `post-rewrite` hook there (in
 //! `git rev-parse --git-path hooks`, which follows `core.hooksPath`): a two-line `sh` script, marked
-//! as capture's, that runs `day x intxt capture git-rewrite "$1"`. git then reports the exact old
+//! as capture's, that runs `day x intxt capture git-rewrite "$1"` (a spelling clones that have the hook keep calling, so `capture` stays as a hidden command). git then reports the exact old
 //! and new commit of every amend and rebase, which capture records beside the worktree's commits
 //! and `day x intxt add` copies into an intxt that holds the old one. The hook needs `day` on
-//! the `PATH` git runs with, and the node's daemon (set `DAY_NODE` in the environment if the node
+//! the `PATH` git runs with, and the node's server (set `DAY_NODE` in the environment if the node
 //! is not the default). A `post-rewrite` hook that is not capture's is never overwritten or
 //! chained: `day x intxt status` says "hook not installed: foreign post-rewrite", and rewrites are
 //! then matched by patch id only. `day x intxt capture install-git-hooks` installs it on request
@@ -48,8 +37,8 @@
 //!
 //! # ACP agents
 //!
-//! `day x intxt record -- <agent command>` records an ACP agent for the client that launches it:
-//! point the editor's agent command at it (`day x intxt record -- claude-code-acp`). It forwards
+//! `day x intxt record acp -- <agent command>` records an ACP agent for the client that launches it:
+//! point the editor's agent command at it (`day x intxt record acp -- claude-code-acp`). It forwards
 //! the connection unchanged and records session starts and prompt turns (see `record.rs`).
 //!
 //! `claude-code-acp`, `gemini --experimental-acp` and `codex-acp` are the agents it is meant for;
@@ -59,6 +48,7 @@
 pub(crate) mod capture;
 mod edit;
 mod github;
+mod hooks;
 pub(crate) mod package;
 pub(crate) mod participant;
 mod record;
@@ -70,7 +60,6 @@ use crate::interlude::*;
 use big_dispatch_core::Readiness;
 use intxt_core::client::Caller;
 use intxt_core::edit::Named;
-use method_core::Method;
 use service_utils_rs::RequestContext;
 
 #[derive(Debug, clap::Subcommand)]
@@ -238,6 +227,8 @@ pub enum IntxtCommands {
     /// Show what an intxt holds: its commits, jj changes, tracked refs and sessions
     ///
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
+    /// With `DAY_INTXT_VIEWER` set to a web viewer's base URL, a `view:` line gives the intxt's
+    /// page there.
     #[command(after_long_help = "Examples:\n  day x intxt show qx")]
     Show {
         /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on
@@ -329,8 +320,9 @@ pub enum IntxtCommands {
     ///
     /// Prints a collapsed `<details>` holding a JSON code block (`org.example.intxt.prLinks`) with
     /// each intxt's `dtxt:doc:` reference (hinting at this node and the peers it syncs with), title
-    /// and tracked refs, to paste at the end of the description. Default: the intxt this worktree
-    /// is on. Reading a PR with `day x intxt github pull` finds the intxts it names there.
+    /// and tracked refs, to paste at the end of the description. With `DAY_INTXT_VIEWER` set to a
+    /// web viewer's base URL, a line of Markdown links to each intxt's viewer page leads it, for a
+    /// reader on a phone. Default: the intxt this worktree is on. Reading a PR with `day x intxt github pull` finds the intxts it names there.
     #[command(after_long_help = "Examples:\n  day x intxt pr-block\n  day x intxt pr-block qx qy")]
     PrBlock {
         /// The intxts: short ids, or full drawer ids. Default: the one this worktree is on
@@ -342,7 +334,8 @@ pub enum IntxtCommands {
     /// intxts that include this worktree's commits, its clone's tracked refs or its sessions.
     #[command(after_long_help = "Examples:\n  day x intxt status")]
     Status,
-    /// Record one Claude Code hook invocation: the hook's JSON on stdin
+    /// Record one Claude Code hook invocation: the hook's JSON on stdin (the old spelling of
+    /// `record hook` and `record git-rewrite`, kept for hooks already installed)
     ///
     /// Observes the session's transcript and worktrees, puts changed binary files in the node's
     /// blob store, and records everything in the node's capture drawer. Install it as the command
@@ -352,6 +345,7 @@ pub enum IntxtCommands {
     ///
     /// Its subcommands are git's side of capture: the `post-rewrite` hook capture installs in the
     /// clones it records.
+    #[command(hide = true)]
     Capture {
         /// Say on stderr what was recorded
         #[arg(long, global = true)]
@@ -364,21 +358,98 @@ pub enum IntxtCommands {
         #[command(subcommand)]
         command: GithubCommands,
     },
+    /// Recording: the hooks that record sessions, the ACP proxy, git's side of rewrites
+    ///
+    /// Recording moves raw data into the node's capture drawer. Nothing in it calls for judgement.
+    Record {
+        /// Say on stderr what was recorded (`hook`, `git-rewrite`)
+        #[arg(long, global = true)]
+        verbose: bool,
+        #[command(subcommand)]
+        command: RecordCommands,
+    },
+}
+
+/// What `day x intxt record` does.
+#[derive(Debug, clap::Subcommand)]
+pub enum RecordCommands {
+    /// Write a harness's hook configuration
+    Install {
+        #[command(subcommand)]
+        harness: Harness,
+    },
+    /// Record one Claude Code hook invocation: the hook's JSON on stdin
+    ///
+    /// The command of the hooks `install claude-code` writes. Observes the session's transcript
+    /// and worktrees, puts changed binary files in the node's blob store, and records everything
+    /// in the node's capture drawer. It prints nothing unless it has something to report or
+    /// `--verbose` is given, and then only to stderr; it never exits with status 2, which
+    /// Claude Code feeds back to the model.
+    Hook,
     /// Record an ACP session: run the agent command, passing everything through
     ///
-    /// An ACP client (an editor) launches this in place of the agent, e.g. `day x intxt record --
+    /// An ACP client (an editor) launches this in place of the agent, e.g. `intxt record acp --
     /// claude-code-acp`. It spawns the agent, forwards the client's stdin to it and its stdout to
     /// the client unchanged, and records the session's messages, tool calls and plan, and the edits
     /// each prompt turn made in the session's working directory, in the node's capture drawer.
-    /// Needs the node's daemon; without one the session runs unrecorded. A recording that fails
+    /// Needs the node's server; without one the session runs unrecorded. A recording that fails
     /// says why on stderr and stops, and the session goes on. Exits with the agent's status.
-    Record {
+    Acp {
         /// Record the agent's thinking (`agent_thought_chunk`) as well
         #[arg(long)]
         thinking: bool,
         /// The agent's command and arguments
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         agent: Vec<String>,
+    },
+    /// Record the commits git's `post-rewrite` hook reports as replaced (stdin: `<old> <new>`
+    /// per line) in this worktree's capture
+    ///
+    /// What the `post-rewrite` hook capture installs in a clone runs; git passes `amend` or
+    /// `rebase`. A failure is one line on stderr and status 1; git ignores it, since
+    /// `post-rewrite` cannot block.
+    GitRewrite {
+        /// What was rewritten, git's argument to the hook
+        #[arg(value_enum)]
+        kind: capture::RewriteKind,
+    },
+}
+
+impl RecordCommands {
+    async fn run(self, verbose: bool) -> Res<ExitCode> {
+        match self {
+            Self::Install {
+                harness: Harness::ClaudeCode { user, dry_run },
+            } => hooks::run(user, dry_run),
+            Self::Hook => capture::CaptureCommands::run(None, verbose).await,
+            Self::Acp { thinking, agent } => record::run(agent, thinking).await,
+            Self::GitRewrite { kind } => {
+                capture::CaptureCommands::run(
+                    Some(capture::CaptureCommands::GitRewrite { kind }),
+                    verbose,
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// The harnesses `record install` writes a configuration for.
+#[derive(Debug, clap::Subcommand)]
+pub enum Harness {
+    /// Write the Claude Code hooks into `./.claude/settings.json`
+    ///
+    /// Adds a hook running `intxt record hook` to every event that is recorded, merging into the
+    /// file: other keys and hooks stay, running it twice changes nothing, and an older `day x
+    /// intxt capture` entry becomes the new command. Malformed JSON is an error and the file is
+    /// left alone.
+    ClaudeCode {
+        /// Write `~/.claude/settings.json` instead of the project's
+        #[arg(long)]
+        user: bool,
+        /// Print the resulting JSON and write nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -411,7 +482,7 @@ pub enum GithubCommands {
 
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
-        IntxtCommands::Record { thinking, agent } => record::run(agent, thinking).await,
+        IntxtCommands::Record { verbose, command } => command.run(verbose).await,
         IntxtCommands::Github { command } => {
             with_packaging(async |packaging| match command {
                 GithubCommands::Pull { target } => {
@@ -670,19 +741,20 @@ async fn with_packaging_exit(
     let participant = participant::Detected::from_process(config.node_dir.root())?;
     verb(
         &package::Packaging::new(&client, &cwd, config.node_dir.root())
-            .participating_as(participant),
+            .participating_as(participant)
+            .viewing_at(config.cli_config.viewer_url.as_deref()),
     )
     .await
 }
 
-/// Capture runs against the node's daemon only. Booting the node in the hook's own process costs
+/// Capture runs against the node's server only. Booting the node in the hook's own process costs
 /// seconds per hook, and parallel tool calls run parallel hooks, of which only one process can
 /// hold the node. The socket is probed, not connected to through [`NodeClient`], which would boot
 /// the node just to be refused.
 pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
     eyre::ensure!(
         dir.probe_socket().await? == crate::context::SocketState::Live,
-        "no daemon is serving the node at {}; start it with `day node start`",
+        "no server is running the node at {}; start one with `day node start --bg`",
         dir.root().display()
     );
     Ok(())
@@ -692,20 +764,13 @@ pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
 /// error, reported as the node gave it.
 pub(crate) async fn call<M>(client: &NodeClient, input: M) -> Res<M::Output>
 where
-    M: Method,
-    M::Output: serde::de::DeserializeOwned,
+    M: method_core::Unary,
+    M::Error: std::fmt::Display,
 {
-    let reply = client
-        .call(M::XRPC.nsid, M::XRPC.method, &serde_json::to_value(input)?)
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "{} failed with {}: {}",
-        M::XRPC.nsid,
-        reply.status,
-        reply.body
-    );
-    Ok(serde_json::from_value(reply.body)?)
+    client
+        .call(input)
+        .await
+        .map_err(|error| eyre::eyre!("{} failed: {error}", M::XRPC.nsid))
 }
 
 #[cfg(test)]

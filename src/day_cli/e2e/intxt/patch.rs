@@ -54,7 +54,7 @@ async fn read_blob_text(client: &NodeClient, scratch: &Path, reference: &str) ->
     .capability_id;
     let downloaded = scratch.join("patch-blob.bin");
     let reply = client
-        .call_raw(
+        .call_untyped_bytes(
             ReadBlob::XRPC.nsid,
             ReadBlob::XRPC.method,
             &serde_json::to_value(ReadBlob {

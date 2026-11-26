@@ -1,0 +1,11 @@
+package townframe:intxt-web@0.1.0;
+
+world intxt-web {
+  import wasi:http/types@0.3.0;
+  // The node is reached with outgoing requests, and found through the environment.
+  import wasi:http/client@0.3.0;
+  import wasi:cli/environment@0.3.0;
+  // The entropy getrandom's custom backend links on wasm32-wasip3 (request ids are UUIDv7).
+  import wasi:random/random@0.3.0;
+  export wasi:http/handler@0.3.0;
+}

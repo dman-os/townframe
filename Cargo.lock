@@ -4228,6 +4228,9 @@ dependencies = [
  "directories",
  "futures",
  "http",
+ "insta",
+ "intxt_capture",
+ "intxt_core",
  "libc",
  "method_core",
  "rand 0.9.5",
@@ -4236,8 +4239,10 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "service_client_core_rs",
  "service_utils_rs",
  "shadow-rs",
+ "short_ids",
  "sqlite_rs",
  "tempfile",
  "thiserror 2.0.21",
@@ -8190,6 +8195,81 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "intxt_capture"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "blake3",
+ "intxt_core",
+ "jiff",
+ "serde",
+ "serde_json",
+ "similar 2.7.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "intxt_core"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_nodule_core",
+ "blake3",
+ "indexmap 2.14.2",
+ "jiff",
+ "macros",
+ "method_core",
+ "method_lexicon",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "intxt_nodule"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_ndk_testing",
+ "http",
+ "intxt_capture",
+ "intxt_core",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_utils_rs",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "intxt_web_host"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "http",
+ "tokio",
+ "tracing",
+ "utils_rs",
+ "wash-runtime",
 ]
 
 [[package]]
@@ -14515,6 +14595,14 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "short_ids"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "signal-hook"

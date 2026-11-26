@@ -1,0 +1,15 @@
+version = 1
+role = "application"
+dependency_reason = "The viewer is a wasi:http component that reads an intxt from a node over its XRPC, with the same datum types and wire envelope the CLI and the nodules use."
+allowed_dependencies = [
+    "big_blobs_core",
+    "big_cabinet_core",
+    "intxt_core",
+    "method_core",
+    "service_client_core_rs",
+    "service_core_rs",
+]
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]
+default_features = false

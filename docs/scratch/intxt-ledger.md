@@ -18,7 +18,18 @@ Set by the operator, 2026-11-24 (D76, D77). These outrank the older week goals (
 
 **The principle under both** (D74): record and structure always; work out use and delivery later.
 
-**This week (D77, D78–D80), product goals.** Both are a matter of code, not invention, so they go first:
+**This week (D77–D86), product goals:**
+- **Review on mobile is the read-only web viewer** in a phone's browser (D86).
+- Anything that changes an intxt, review included, lives in the desktop and phone app.
+- Forges are deferred (D85).
+
+The viewer's remaining work, in order:
+1. A real source: read an intxt through the viewer's relay node. Until "public" exists (C11), access is a per-intxt invite of that node.
+2. Hosting the relay and the viewer on the x86 box that replaces mothership (operator).
+3. Commits, messages and patches from the intxt itself (VCS-agnostic): plain server-rendered diffs first, then claytxt's diff view (C12).
+4. A phone-first layout, with its own Tailwind build.
+5. `day x intxt show` and the PR block carry the viewer link.
+6. Comment threads, session summaries, and Markdown descriptions.
 
 - **The web app** (D79): a neutral viewer of intxts across any number of relays, run by a relay provider, so review works from a phone's browser. MVP grade.
   - It's built in Dioxus, SSR first, as a wasm `wasi:http` component, after the `src/btress_sysadmin` precedent (Leptos SSR).
@@ -26,7 +37,7 @@ Set by the operator, 2026-11-24 (D76, D77). These outrank the older week goals (
   - Don't over-depend on that model: intxts should be viewable without a node, and webnodes are coming. So the rendering and resolving components are built to be reused by a webnode, and the relay-backed server is one host of them.
   - What "public" means is still developing; progress doesn't wait on it.
   - This is the web app, not the phone app.
-- **Forge integration** (D80), designed generally (C5). Authentication and identity come first, including linking a PR and an intxt; how to start is to be discussed with the operator (`intxt-forge-identity.md`).
+- **Forge integration: deferred (D85).** The notes below stay for when it returns. It was to be designed generally (C5), with authentication and identity first, including linking a PR and an intxt (`intxt-forge-identity.md`).
   - TypeScript is usable: `src/btress_auth` runs Better Auth as a `jco componentize` wasm component.
   - No Rust port of forges.link was found (11-24); the closest is `vcs-forge`, which covers the PR lifecycle on GitHub, GitLab and Gitea and is CLI-oriented.
   - forges.link is the reference vocabulary. It is `forges`, Daniel Roe's MIT TypeScript client for 14 forges, not a protocol. Its parts that matter here:
@@ -54,6 +65,9 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
     - What's missing: a micro reaching its granted `#drawers` through the 6.2 domain handle on `Cx`.
     - To drop `ReviewConfig`, the review micro declares its uses in its manifest (`#drawers` read for intxt kinds, and blobs) and reads the drawer and blob handles from `Cx`. The host part goes on claytxt's stack after its NSID layer; the micro side is intxt's.
 - **C12, the web app can't show diffs yet.** Pierre's diff view mounts in a shadow root, so server-side rendering without a browser needs declarative shadow DOM (`<template shadowrootmode>`). Owner: claytxt (this week's web-components work). The kit itself renders under dioxus-ssr: it has no host or `clay_mdk` dependency, and serves `assets/tailwind.css` as a plain link without the `host` feature. Interactive pieces render static without hydration.
+- **C13, a micro can't read blobs that arrive after install.** The review micro reads patch blobs that the intxt commits documents reference (`org.example.daybook.blob/<digest>`). On node-55, `BlobsScope` lists exact blob ids, so no capability minted at install covers them. **Already built by nodules** in #244 (`stack/node-67-blobs-drawer-read`): `BlobsScope.drawers` reads any blob in the inventory of a drawer the minter reaches at Read. It's checked at read time, and a read right after a write can briefly race the inventory's projection. Closed by restacking onto node-76; no new design is needed. Then:
+  - claytxt mints `{drawers: [intxtDrawers]}` as the review micro's `blobCap` and grants `blobs.read`. Their layer 56 mints an empty `blobCap` until then, so the configuration decodes.
+  - claytxt cherry-picks intxt's `read_blob` wiring (7224c1c0) onto their layer 27.
 - **C3, the cartridge is published with the fixture key** (`sign_as_example`). Fix: the publisher signing namespace / DID, which the operator deferred on 11-18. Owner: nodules.
 - **C4, intxt's CLI is compiled into `day`** (`src/day_cli/cmds/intxt*`). A cartridge can't contribute commands, so intxt is a special case in the node's own binary. Fix: cartridge-contributed CLI verbs, or a generic `day x <cartridge> …` dispatch over the cartridge's methods. Owner: nodules.
   - Nodules' leaning (11-24), with a written proposal to follow: `day x <cartridge> <verb>` resolves a command binding (consumer-owned metadata naming a method NSID, their D2b) and derives its flags from the method's Lexicon `parameters`/`input`, so the manifest carries only the verb name and help text. A host-side CLI component comes later, for verbs that need local files or a TTY.
@@ -72,6 +86,7 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
 - **C7, who wrote something is claimed, not attested.** The marker `writer` (#228) and a comment's `creator`/`generator` (D69) are claims, because the operator and an agent on one node are one attested actor. Fix: ADR 043 per-agent actors (and D49, the Claude Code plugin as a subsystem actor under intxt's). Owner: nodules.
 - **C8, intxt's content documents are found by a `<kind>/main` marker over `PollDatums`** (D70). This is a convention local to intxt for "the documents of kind K in drawer D, per writer". Question for nodules: is it a cabinet-level pattern other cartridges should use, or a gap in drawer layout?
   - Nodules (11-24): undecided. They lean towards a cabinet-level roster role, because a marker plus `PollDatums` is a scan each cartridge reimplements. It touches automata's drawer rework, so they'll check with automata. Until then the marker is the interim pattern, which nodules will document as interim.
+  - Operator (11-24), an alternative: the intxt's meta document lists its other documents by role, so there's no marker and no scan.
 - **C9, general pieces live in intxt crates:**
   - anchors (`intxt_capture::anchor`: W3C quote and context, carried over hunks), which comments anywhere need;
   - the `DocReference` `via=` hint, general by the 11-17 decision.
@@ -80,6 +95,8 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
 - **C10, forge credentials have no home on the node.** The CLI passes the operator's `gh` token per call; node secret storage doesn't exist. A webnode doing GitHub's device flow will need a stateless CORS proxy, because GitHub's OAuth endpoints don't send CORS headers (to verify). Fix: node secret storage (nodules), and the proxy as a relay-provider service. Owners: nodules, then whoever runs relays.
   - Nodules (11-24): secret storage is on their roadmap; `secrets_rs` already holds node keys. The proposed shape follows wasmCloud's secrets: a `#secret/<name>` permbind whose value the guest never reads. Egress injects it into requests to the hosts the binding names, for example as a header, so the token never passes through `day` or the guest.
   - Open for intxt: a forge client (the forges library) sets `Authorization` itself, so under injection it runs with a placeholder credential, or anonymous, and egress adds the header.
+  - Operator (11-24): a secret could be a variant of local state, kept on one node and never synced. To raise with nodules.
+  - For the web viewer, the CORS proxy is moot (D82): server-side loads are same-origin, and the server passes a credential through without keeping it. It returns only for a webnode with no viewer server behind it.
 - **C11, "public" is undefined** (D79). The web app's own relay node reads intxts it was told about, but no drawer access level means "anyone may read". Fix: a public read level in drawer access. Owner: nodules.
   - Nodules (11-24): keyhive has a Public agent, a well-known key. A drawer grant of Read to Public means anyone with the bytes may read them: the content stays sealed, but with a key everyone knows. Nodules will sketch it against ADR 026's public root and relays.
 
@@ -216,6 +233,31 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - The web app signs the user in to the forge ("sign in to GitHub"), not to itself, and no server keeps identities, sessions or relationships. Better Auth leaves the viewer.
   - This holds for every service integration, because daytxt is p2p first: the user's node, or later their webnode, holds the credential.
   - Tokens come first; the GitHub device flow under one daytxt client id after them (`intxt-forge-identity.md`, second draft).
+- **D82 (2026-11-24, operator) The web viewer is read-only and server-rendered, and the app is `view(state)`.**
+  - Read-only, like GitHub's logged-out view.
+  - Server-side async loads run before rendering, as a page loader does.
+  - No server functions and no hydration for now.
+  - One set of components renders a view model. Only where the state comes from differs:
+    - the review micro, from the node;
+    - the web app, from drawers loaded server-side through its relay node;
+    - a webnode later, in the browser.
+- **D83 (2026-11-24, operator) Products are built on daytxt, not inside `day`** (recasts C4).
+  - daytxt ships the node as a shared service, plus an SDK: XRPC clients that find the local node or embed one.
+  - intxt is a product on it. `day` doesn't grow a CLI-extension surface, since what doesn't run in wasm for ordinary users is out of the platform's scope.
+  - **Interim:** intxt stays a `day` subcommand, and `day` invoked as `intxt` (a symlink, by argv[0]) behaves as `day x intxt`. Hooks then call a stable `intxt` command now, which would be hard to change once people use it.
+  - Open: how a platform and a product share one CLI. Prior art:
+    - multicall by argv[0] (busybox, rustup's proxies);
+    - plugins found on PATH (`git-<x>`, `cargo-<x>`, `kubectl-<x>`, `gh` extensions, docker CLI plugins).
+- **D84 (2026-11-24, operator) `day` takes CLI plugins from PATH, git style.**
+  - `day <name>` execs `day-<name>` when `<name>` isn't a built-in, and built-ins always win.
+  - intxt is the first plugin: argv[0] `intxt` or `day-intxt` behaves as `day x intxt`, so a symlink serves both `day intxt` and `intxt` now. Later `day-intxt` becomes its own binary on nodules' SDK, with no change for users. Being built on stack/intxt-35.
+  - Open with nodules: the desktop refuses a node that `day` already holds, because the GUI hosts micros in-process on the booted node and attaching isn't built. The options are attach over the socket, a holder handoff, or the node as its own long-lived service (D83's shape).
+  - Nodules (11-24) owns it and picks attach: the micro host's in-process work (installing micro actors, minting their capabilities, dispatching their calls) becomes privileged node methods behind the operator root capability (#245), routed by ADR 045, and the composition attaches through the SDK client crate. It is also the road to the long-lived service. A holder handoff is dropped as fragile. The write-up comes with the SDK's.
+- **D85 (2026-11-24, operator) Forges are deferred.**
+  - No forge cartridge, no forge datums, no ingesting from GitHub, and no pushing comments back.
+  - intxt is VCS-agnostic and carries its own commits (commits documents and packs), so the viewer needs nothing from a forge to show them.
+  - The forge identity proposal waits.
+- **D86 (2026-11-24, operator) Mutations live in the app; the web viewer only reads.** Review and anything else that changes an intxt belong in the desktop and phone app, never in the web viewer. Review on mobile this week means reading an intxt in the viewer.
 
 ## For the ADRs
 
@@ -426,6 +468,7 @@ Keep this section short: what's moving now and what's next. Move finished entrie
   - None of FDR 010's datums exist, and no fences or inline tags (D75).
   - The operator and an agent are one actor (C7).
   - The operator's `day` lacks layers 28/29/31.
+- **Restack onto node-76 (2026-11-24): needed now.** The intxt stack and claytxt's both sit on node-55. node-56..76 bring `BlobsScope.drawers` (#244, closes C13), so "Show changes" can read patches, along with the typed `day` client below. claytxt rebases after intxt. The to-do list from 11-19 still applies:
 - **To do when restacking onto nodules' node-67** (`stack/node-67-day-typed`, 2026-11-19):
   - Move `day x intxt` onto the typed `NodeClient::call<M: Unary>`. `call_untyped`/`call_untyped_bytes` remain only for `day exec`, byte bodies and wire tests.
   - The server verbs change: `day node start` runs in the foreground and `--bg` backgrounds it; `node run` is gone; user text says "server", not "daemon"; the log is `serve.log`.

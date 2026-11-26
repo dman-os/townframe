@@ -925,14 +925,14 @@ mod blackbox {
 
         create("fresh process");
 
-        let started = sandbox.day(&["node", "start"]);
+        let started = sandbox.day(&["node", "start", "--bg"]);
         assert!(started.status.success(), "{}", text(&started));
         create("daemon process");
 
         let stopped = sandbox.day(&["node", "stop"]);
         assert!(stopped.status.success(), "{}", text(&stopped));
 
-        let restarted = sandbox.day(&["node", "start"]);
+        let restarted = sandbox.day(&["node", "start", "--bg"]);
         assert!(restarted.status.success(), "{}", text(&restarted));
         create("restarted daemon process");
 

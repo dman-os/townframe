@@ -1,0 +1,30 @@
+[package]
+name = "intxt_web_host"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "intxt_web_host"
+path = "main.rs"
+
+[dependencies]
+#
+# internal
+utils_rs.workspace = true
+
+#
+# wasm host
+wash-runtime.workspace = true
+
+#
+# cli
+clap = { workspace = true, features = ["derive", "env"] }
+
+#
+# http, async
+http.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing.workspace = true

@@ -68,10 +68,28 @@ impl Intxt {
     pub fn reference(drawer: &DocId, via: impl IntoIterator<Item = MultibaseKey>) -> DocReference {
         DocReference::new(drawer.clone()).with_via(via)
     }
+
+    /// Where the read-only web viewer shows the intxt `reference` names: `<base>/i/<drawer id>`,
+    /// with the reference's `via` hint as the `via=` query the viewer reads (the nodes joined by
+    /// `|`, percent-encoded so the URL survives being pasted into Markdown). A trailing `/` on
+    /// `base` is dropped.
+    pub fn viewer_url(base: &str, reference: &DocReference) -> String {
+        let mut url = format!("{}/i/{}", base.trim_end_matches('/'), reference.document());
+        for (index, key) in reference.via().iter().enumerate() {
+            url.push_str(if index == 0 { "?via=" } else { "%7C" });
+            url.push_str(&key.to_string());
+        }
+        url
+    }
 }
 
 /// The `$type` that marks the PR description block.
 const PR_LINKS_TYPE: &str = "org.example.intxt.prLinks";
+
+/// Opens the Markdown line above the block that links each intxt's web viewer page. The comment
+/// renders as nothing; it is what lets [`PrLinks::split`] and [`PrLinks::write_into`] recognise
+/// the line as theirs, so it is stripped and replaced with the block instead of piling up.
+const VIEWER_LINE_MARKER: &str = "<!-- intxt:viewer -->";
 
 /// One intxt a PR description names (an entry of [`PrLinks::intxts`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,7 +192,8 @@ pub struct PrLinks {
 /// Where the intxt block sits in a description and what it holds.
 struct FoundBlock {
     links: PrLinks,
-    /// The byte range of the enclosing `<details>` element, from its opening line to the end of
+    /// The byte range of the block: the enclosing `<details>` element (and the viewer line above
+    /// it, if any), from its opening line to the end of
     /// its closing line, line break excluded.
     span: std::ops::Range<usize>,
 }
@@ -206,8 +225,11 @@ impl PrLinks {
         Ok((text, found.links))
     }
 
-    /// The block to paste at the end of a PR description.
-    pub fn block(&self) -> String {
+    /// The block to paste at the end of a PR description. With a `viewer` base URL
+    /// ([`Intxt::viewer_url`]) it is preceded by a line of plain Markdown links to each intxt's
+    /// viewer page, for a reader who cannot expand the `<details>` (GitHub's phone app). The line
+    /// is part of the block: [`PrLinks::split`] strips it and [`PrLinks::write_into`] replaces it.
+    pub fn block(&self, viewer: Option<&str>) -> String {
         let mut object = serde_json::Map::new();
         object.insert("$type".to_owned(), PR_LINKS_TYPE.into());
         object.insert(
@@ -216,19 +238,57 @@ impl PrLinks {
         );
         object.extend(self.extra.clone());
         let json = serde_json::to_string_pretty(&object).expect("a block is plain JSON");
-        format!("<details>\n<summary>intxt</summary>\n\n```json\n{json}\n```\n\n</details>")
+        let details =
+            format!("<details>\n<summary>intxt</summary>\n\n```json\n{json}\n```\n\n</details>");
+        match viewer.filter(|_| !self.intxts.is_empty()) {
+            Some(base) => format!("{}\n\n{details}", self.viewer_line(base)),
+            None => details,
+        }
+    }
+
+    /// `<!-- intxt:viewer -->Read on the web: [title](url) · [title](url)`, each titled by its
+    /// link's title or else its drawer id.
+    fn viewer_line(&self, base: &str) -> String {
+        let links = self
+            .intxts
+            .iter()
+            .map(|link| {
+                let label = link
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| link.reference.document().to_string());
+                // Escape what would end the link text; a title is one line.
+                let mut text = String::with_capacity(label.len());
+                for c in label.chars() {
+                    match c {
+                        '\\' | '[' | ']' => {
+                            text.push('\\');
+                            text.push(c);
+                        }
+                        '\n' | '\r' => text.push(' '),
+                        c => text.push(c),
+                    }
+                }
+                format!("[{text}]({})", Intxt::viewer_url(base, &link.reference))
+            })
+            .collect::<Vec<_>>();
+        format!("{VIEWER_LINE_MARKER}Read on the web: {}", links.join(" · "))
     }
 
     /// `description` with its intxt block replaced by this one, or with the block appended when
     /// it has none. The rest of the text is untouched, and the line ending of the block follows
     /// the text it joins (CRLF if the description uses it), so writing the same links again
     /// returns the same text.
-    pub fn write_into(&self, description: &str) -> Result<String, PrBlockError> {
+    pub fn write_into(
+        &self,
+        description: &str,
+        viewer: Option<&str>,
+    ) -> Result<String, PrBlockError> {
         let crlf = description.contains("\r\n");
         let block = if crlf {
-            self.block().replace('\n', "\r\n")
+            self.block(viewer).replace('\n', "\r\n")
         } else {
-            self.block()
+            self.block(viewer)
         };
         let Some(found) = Self::find(description)? else {
             let newline = if crlf { "\r\n" } else { "\n" };
@@ -316,9 +376,24 @@ impl PrLinks {
                     .is_some_and(|(_, depth, _)| *depth == open.len())
                 {
                     let (links, _, opened) = found.take().expect("just checked");
+                    // The viewer line, when there is one, sits two lines above the `<details>`
+                    // with a blank line between, and belongs to the block.
+                    let opening = lines
+                        .iter()
+                        .position(|(at, _)| *at == opened)
+                        .expect("the block's `<details>` starts a line");
+                    let from = match opening.checked_sub(2) {
+                        Some(above)
+                            if lines[above].1.starts_with(VIEWER_LINE_MARKER)
+                                && lines[above + 1].1.trim().is_empty() =>
+                        {
+                            lines[above].0
+                        }
+                        _ => opened,
+                    };
                     return Ok(Some(FoundBlock {
                         links,
-                        span: opened..start + at + tag.len(),
+                        span: from..start + at + tag.len(),
                     }));
                 }
                 open.pop();

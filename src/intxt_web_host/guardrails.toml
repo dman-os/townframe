@@ -1,0 +1,7 @@
+version = 1
+role = "application"
+dependency_reason = "Runs the intxt viewer component as a workload in a wash_runtime host, apart from big_node: the viewer reaches a node over its XRPC like any other client, and the host only gives it a socket, its environment and an egress allowlist."
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false
+
+[builds.native]
