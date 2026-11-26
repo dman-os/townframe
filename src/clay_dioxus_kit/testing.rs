@@ -254,6 +254,7 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "clip-path",
     "clip-rule",
     "slot",
+    "part",
 ];
 
 /// The serialized converter, except that a mounted event carries the element backing the test
