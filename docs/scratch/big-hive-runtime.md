@@ -338,6 +338,48 @@ One per document with a handle, an interest, or catch-up work. It replaces runti
   an earlier failure must then abort every later write. Start without it.
 - **Checkpoint coverage:** inside this machine on `epoch_moved`, or its own wake through the hub.
 
+## 12. The Write coordinator (draft)
+
+The protocol is section 7. As a machine:
+
+- **State:** plans in flight (plan id → document set, the prepared changes and encryptions
+  received so far, the commit call); queued plans whose document set overlaps one in flight.
+- **Inputs:** `submit { call, plan }` from a caller; `prepared`, `encrypted` and `committed`
+  outcomes.
+- **Commands:** `Prepare` to each Document, `PrepareEncrypt` to the Keyhive boundary, one
+  `Commit`, then `Apply` or `Abort` to each Document and `ApplyEncrypt`, and `Reply` to the
+  caller.
+- **Laws:** a plan's documents are disjoint from every other plan in flight; a plan commits
+  all its documents' rows or none; every document that was prepared gets exactly one `Apply` or
+  `Abort`; queued plans start in submission order once their documents are free.
+
+## 13. The Hub machine (draft)
+
+Only the policy from runtime2's hub survives (see the inventory's policy column). Plumbing goes
+to its driver, and plain reads leave it entirely.
+
+- **Document lifetime:** which documents have a running machine; handle and interest refcounts
+  forwarded from Document machines; idle deadlines; a generation per start so a stale handle is
+  recognised. Starting and stopping a Document loop is a command to the driver.
+- **Routing:** change-feed rows (`tree_changed`) to running Documents; keyhive epoch moves to
+  the Documents they unblock. **No Document is started just because keyhive changed.**
+- **Catch-up:** a `KeyedScheduler` over documents (concurrency limit, park until keys arrive,
+  wake on epoch) and a `kit::watermark` cursor over the change feed: a readable document whose
+  tree `rev` is ahead of its `frontier_rev` gets a Document started to materialize and publish.
+  The cursor is durable, so a restart resumes from it.
+- **Keyhive rounds per peer:** `Idle → Active → Deferred` until our admission state catches up,
+  with waiters, coalesced notifications and cancel on disconnect, from runtime2's hub
+  (`hub.rs:2808`, `:244`). The rounds themselves run in the Keyhive boundary; the hub owns only
+  the per-peer policy.
+- **Connections:** which connection is current per peer, and starting or stopping the sync
+  backend's per-peer drivers.
+- **Draining:** a state in which no new work starts and the machine reports when nothing is
+  outstanding. This replaces runtime2's `cmd_closed` and the test-only quiescence probes.
+- **Laws:** at most one running Document per document id; a Document stops only when it reports
+  itself evictable; every stale readable document is either running, queued or parked; parked
+  documents wake on the epoch move that unblocks them; draining ends exactly when nothing is in
+  flight.
+
 ## Open questions
 
 1. **Subduction in the simulation.** It spawns through an injected spawner, which suits a seeded
