@@ -6,7 +6,10 @@ use keyline::contract::Version;
 use sqlite_rs::Executor;
 use sqlite_rs::Sql;
 
+use crate::engine;
+use crate::engine::Extension;
 use crate::error::Error;
+use crate::rows;
 use crate::rows::CertificateRow;
 use crate::sqlite::queries;
 
@@ -29,9 +32,16 @@ pub struct Staged<W> {
     /// The batch with the bytes written for each, if it added anything; some of it may have been in
     /// the set already. Handed to the verification memo once the transaction commits.
     pub(crate) warm: Vec<(Vec<u8>, VerifiedCertificate<W>)>,
+    /// What extending the stored reach by the batch cost.
+    extension: Extension,
 }
 
 impl<W> Staged<W> {
+    /// Rounds and facts of extending the stored reach by the batch.
+    pub fn extension(&self) -> Extension {
+        self.extension
+    }
+
     /// The version of the set after the transaction commits: what
     /// [`Keyline::insert`](keyline::contract::Keyline::insert) would return.
     pub fn version(&self) -> Version {
@@ -46,7 +56,7 @@ impl<W> Staged<W> {
 
 /// Add `batch` through `tx`, which must hold the database's writer.
 ///
-/// `INSERT OR IGNORE` leaves certificates already in the set alone and reports how many rows
+/// `ON CONFLICT DO NOTHING` leaves certificates already in the set alone and reports how many rows
 /// it added, so the version moves exactly when the set grew (by one for the whole batch).
 pub async fn insert_in<W: Encode>(
     tx: &impl Executor,
@@ -57,7 +67,7 @@ pub async fn insert_in<W: Encode>(
     let mut warm = Vec::with_capacity(batch.len());
     for chunk in batch.chunks(MAX_PARAMS / CertificateRow::WIDTH) {
         let mut sql = Sql::new(
-            "INSERT OR IGNORE INTO keyline_certificates\n     ( kind\n     , digest\n     , issuer\n     , audience\n     , subject\n     , power\n     , citation\n     , revoke\n     , retain\n     , signed\n     )\nVALUES ",
+            "INSERT INTO keyline_certificates\n     ( kind\n     , digest\n     , issuer\n     , audience\n     , subject\n     , power\n     , citation\n     , revoke\n     , retain\n     , signed\n     )\nVALUES ",
         );
         for (index, cert) in chunk.iter().enumerate() {
             if index != 0 {
@@ -67,6 +77,7 @@ pub async fn insert_in<W: Encode>(
             warm.push((row.signed().to_vec(), cert.clone()));
             sqlite_rs::BindTuple::bind_tuple(row, &mut sql);
         }
+        sql.push("\n    ON CONFLICT DO NOTHING");
         inserted += sql.execute(tx).await?.rows_affected;
     }
     if inserted == 0 {
@@ -74,12 +85,17 @@ pub async fn insert_in<W: Encode>(
             base,
             version: base,
             warm: Vec::new(),
+            extension: Extension::default(),
         });
     }
     queries::bump_version(tx).await?;
+    // The set grew: extend the stored reach by the batch (duplicates among it derive nothing new).
+    let ids: Vec<(i64, Vec<u8>)> = batch.iter().map(|cert| rows::kind_and_digest(cert.id())).collect();
+    let extension = engine::extend(tx, &ids).await?;
     Ok(Staged {
         base,
         version: base + 1,
         warm,
+        extension,
     })
 }

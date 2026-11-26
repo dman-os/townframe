@@ -24,14 +24,15 @@ use keyline::contract::set_digest;
 use keyline::delegation::Delegation;
 use keyline::power::Power;
 use keyline::revocation::RevocationId;
-use keyline_memory::state::State;
 use sqlite_rs::Executor;
 
 use crate::closure;
-use crate::closure::Evaluated;
-use crate::evaluations::Evaluations;
-use crate::memo::Memo;
 use crate::error::Error;
+use crate::memo::Memo;
+use crate::read;
+use crate::read::Question;
+use crate::read::Reply;
+use crate::stratum2;
 use crate::rows;
 use crate::sqlite::queries;
 use crate::write;
@@ -42,12 +43,10 @@ use sqlite_rs::SqliteDb;
 ///
 /// Clones share the database handle and the verification memo. The database's own transactions
 /// are the concurrency control: a query reads one snapshot, an insert holds the writer. Nothing
-/// else is held between calls: an evaluated query loads the closure of its subject from the
-/// tables (see [`closure`](crate::closure)).
+/// else is held between calls but the verification memo: the evaluation lives in the tables.
 pub struct SqliteKeyline<W, D: SqliteDb> {
     db: D,
     memo: Arc<Memo<W>>,
-    evaluations: Arc<Evaluations<W>>,
 }
 
 impl<W, D: SqliteDb> Clone for SqliteKeyline<W, D> {
@@ -55,7 +54,6 @@ impl<W, D: SqliteDb> Clone for SqliteKeyline<W, D> {
         Self {
             db: self.db.clone(),
             memo: Arc::clone(&self.memo),
-            evaluations: Arc::clone(&self.evaluations),
         }
     }
 }
@@ -86,7 +84,6 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         Self {
             db,
             memo: Arc::default(),
-            evaluations: Arc::default(),
         }
     }
 
@@ -112,16 +109,49 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         self.memo.warm(staged.warm);
     }
 
-    /// The closure of `subject` as `snapshot` sees it, with the reference evaluator over it: for a
-    /// caller that answers several questions, or combines them with reads of other stores, in one
-    /// snapshot it owns. `snapshot` must be a read snapshot or a write transaction of the database
-    /// this store is attached to.
-    pub async fn evaluate_in(
+    /// `members(subject)` through `tx`, a write transaction the caller owns: for a caller that
+    /// combines the answer with writes of other stores in one transaction. A disputed subject's
+    /// live set is computed in `tx` if it is not current, and commits with it.
+    pub async fn members_in(
         &self,
-        snapshot: &impl sqlite_rs::QueryExecutor,
+        tx: &impl Executor,
         subject: Identifier,
-    ) -> Result<Evaluated<W>, Error> {
-        closure::load(snapshot, subject, &self.memo).await
+    ) -> Result<BTreeMap<Identifier, Power>, Error> {
+        match self.ask_in(tx, Question::Members(subject)).await? {
+            Reply::Members(members) => Ok(members),
+            other => unreachable!("members answered with {other:?}"),
+        }
+    }
+
+    /// `effective_power(subject, audience)` through `tx`, as [`members_in`](Self::members_in).
+    pub async fn effective_power_in(
+        &self,
+        tx: &impl Executor,
+        subject: Identifier,
+        audience: Identifier,
+    ) -> Result<Option<Power>, Error> {
+        match self
+            .ask_in(tx, Question::EffectivePower(subject, audience))
+            .await?
+        {
+            Reply::Power(power) => Ok(power),
+            other => unreachable!("effective_power answered with {other:?}"),
+        }
+    }
+
+    /// Answer `question` through the write transaction `tx`, computing the live set of a
+    /// disputed subject first if it is not current at the version `tx` reads.
+    async fn ask_in(&self, tx: &impl Executor, question: Question) -> Result<Reply, Error> {
+        let version = queries::meta_version(tx).await?;
+        match read::ask(tx, version, &question).await? {
+            Ok(reply) => Ok(reply),
+            Err(read::Stale(subject)) => {
+                stratum2::refresh(tx, subject, version).await?;
+                read::ask(tx, version, &question)
+                    .await?
+                    .map_err(|stale| unreachable!("{stale:?} is stale right after a refresh"))
+            }
+        }
     }
 
     async fn snapshot(&self) -> Result<Snapshot<D>, Error> {
@@ -130,62 +160,38 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         Ok(Snapshot { tx, version })
     }
 
-    /// The closure of `subject` evaluated at the version `snapshot` read: the one a query of this
-    /// handle evaluated at that version if it is still held, else loaded through the snapshot.
-    async fn state_at(
-        &self,
-        snapshot: &Snapshot<D>,
-        subject: Identifier,
-    ) -> Result<Arc<State<W>>, Error> {
-        if let Some(state) = self.evaluations.at(subject, snapshot.version) {
-            return Ok(state);
-        }
-        let state = Arc::new(
-            closure::load(&snapshot.tx, subject, &self.memo)
-                .await?
-                .into_state(),
-        );
-        self.evaluations
-            .keep(subject, snapshot.version, Arc::clone(&state));
-        Ok(state)
-    }
-
-    /// Answer `query` from the closure of `subject`, at the version one snapshot read.
-    async fn evaluated<T>(
-        &self,
-        subject: Identifier,
-        query: impl FnOnce(&State<W>) -> T,
-    ) -> Result<Versioned<T>, Error> {
+    /// Answer `question` at the version one snapshot read; if it needs a live set that is not
+    /// current, compute it in a write transaction (a refresh is a cache fill, and any process
+    /// that needs it may do it) and answer there.
+    async fn ask(&self, question: Question) -> Result<Versioned<Reply>, Error> {
         let snapshot = self.snapshot().await?;
-        let state = self.state_at(&snapshot, subject).await?;
-        let version = snapshot.finish().await?;
+        if let Ok(reply) = read::ask(&snapshot.tx, snapshot.version, &question).await? {
+            let version = snapshot.finish().await?;
+            return Ok(Versioned {
+                version,
+                value: reply,
+            });
+        }
+        snapshot.finish().await?;
+        let tx = self.db.begin_write().await?;
+        let reply = self.ask_in(&tx, question).await?;
+        let version = version_from_sql(queries::meta_version(&tx).await?);
+        D::commit(tx).await?;
         Ok(Versioned {
             version,
-            value: query(&state),
+            value: reply,
         })
     }
 
-    /// Answer `query` from the closure of the subject of `delegation`, which is where its liveness
-    /// is rooted; a delegation the set does not hold is answered by the empty set.
-    async fn evaluated_for<T>(
-        &self,
-        delegation: Digest<Delegation>,
-        query: impl FnOnce(&State<W>) -> T,
-    ) -> Result<Versioned<T>, Error> {
-        let snapshot = self.snapshot().await?;
-        let subject =
-            queries::delegation_subject(&snapshot.tx, delegation.as_slice().to_vec()).await?;
-        let value = match subject {
-            Some(subject) => {
-                let state = self
-                    .state_at(&snapshot, rows::identifier_from_sql(&subject))
-                    .await?;
-                query(&state)
-            }
-            None => query(&State::new()),
-        };
-        let version = snapshot.finish().await?;
-        Ok(Versioned { version, value })
+    async fn power(&self, question: Question) -> Result<Versioned<Option<Power>>, Error> {
+        let answer = self.ask(question).await?;
+        Ok(Versioned {
+            version: answer.version,
+            value: match answer.value {
+                Reply::Power(power) => power,
+                other => unreachable!("a power question answered with {other:?}"),
+            },
+        })
     }
 }
 
@@ -314,13 +320,20 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
         subject: Identifier,
         audience: Identifier,
     ) -> Query<'_, F, Option<Power>, Error> {
-        F::from_future(
-            self.evaluated(subject, move |state| state.effective_power(subject, audience)),
-        )
+        F::from_future(self.power(Question::EffectivePower(subject, audience)))
     }
 
     fn members(&self, subject: Identifier) -> Query<'_, F, BTreeMap<Identifier, Power>, Error> {
-        F::from_future(self.evaluated(subject, move |state| state.members(subject)))
+        F::from_future(async move {
+            let answer = self.ask(Question::Members(subject)).await?;
+            Ok(Versioned {
+                version: answer.version,
+                value: match answer.value {
+                    Reply::Members(members) => members,
+                    other => unreachable!("members answered with {other:?}"),
+                },
+            })
+        })
     }
 
     fn members_for_subset(
@@ -330,11 +343,11 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
     ) -> Query<'_, F, BTreeMap<Identifier, Power>, Error> {
         F::from_future(async move {
             let snapshot = self.snapshot().await?;
-            let evaluated = closure::load_ids(&snapshot.tx, subset, &self.memo).await?;
+            let state = closure::load_ids(&snapshot.tx, subset, &self.memo).await?;
             let version = snapshot.finish().await?;
             Ok(Versioned {
                 version,
-                value: evaluated.state().members(subject),
+                value: state.members(subject),
             })
         })
     }
@@ -355,13 +368,20 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
     }
 
     fn is_live(&self, delegation: Digest<Delegation>) -> Query<'_, F, bool, Error> {
-        F::from_future(self.evaluated_for(delegation, move |state| state.is_live(&delegation)))
+        F::from_future(async move {
+            let answer = self.ask(Question::IsLive(delegation)).await?;
+            Ok(Versioned {
+                version: answer.version,
+                value: match answer.value {
+                    Reply::Live(live) => live,
+                    other => unreachable!("is_live answered with {other:?}"),
+                },
+            })
+        })
     }
 
     fn conveyed_power(&self, delegation: Digest<Delegation>) -> Query<'_, F, Option<Power>, Error> {
-        F::from_future(
-            self.evaluated_for(delegation, move |state| state.conveyed_power(&delegation)),
-        )
+        F::from_future(self.power(Question::ConveyedPower(delegation)))
     }
 
     fn positive_power(
@@ -369,13 +389,38 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
         subject: Identifier,
         audience: Identifier,
     ) -> Query<'_, F, Option<Power>, Error> {
-        F::from_future(
-            self.evaluated(subject, move |state| state.positive_power(subject, audience)),
-        )
+        F::from_future(async move {
+            let snapshot = self.snapshot().await?;
+            let value = if subject == audience {
+                Some(Power::Admin)
+            } else {
+                queries::reach_standing(
+                    &snapshot.tx,
+                    subject.to_bytes().to_vec(),
+                    audience.to_bytes().to_vec(),
+                )
+                .await?
+                .map(rows::power_from_sql)
+            };
+            let version = snapshot.finish().await?;
+            Ok(Versioned { version, value })
+        })
     }
 
     fn closure(&self, subject: Identifier) -> Query<'_, F, Vec<Certificate<W>>, Error> {
-        F::from_future(self.evaluated(subject, move |state| state.closure(subject)))
+        F::from_future(async move {
+            let snapshot = self.snapshot().await?;
+            let found =
+                queries::closure_certificates(&snapshot.tx, subject.to_bytes().to_vec()).await?;
+            let version = snapshot.finish().await?;
+            Ok(Versioned {
+                version,
+                value: found
+                    .iter()
+                    .map(|row| rows::certificate_from_sql(&row.signed))
+                    .collect(),
+            })
+        })
     }
 
     fn digest(&self) -> Query<'_, F, Digest<CertificateSet>, Error> {

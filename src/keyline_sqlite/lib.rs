@@ -46,10 +46,13 @@
 //! is no browser build: `sqlite_rs` has none.
 
 mod closure;
+mod engine;
 mod error;
-mod evaluations;
 mod memo;
+mod planted;
+mod read;
 mod rows;
+mod stratum2;
 mod store;
 mod write;
 
@@ -61,11 +64,12 @@ mod sqlite {
 
 use sqlite_rs as sqlite_rs_alias;
 
-pub use closure::Evaluated;
+pub use engine::Extension;
 pub use error::Error;
 pub use error::StoredFault;
 pub use sqlite::queries::MIGRATION_TABLE;
 pub use sqlite::queries::MIGRATIONS;
+pub use stratum2::Refresh;
 pub use store::SqliteKeyline;
 pub use write::Staged;
 
