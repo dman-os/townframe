@@ -19,8 +19,11 @@ const CAPACITY: usize = 64;
 
 const ERROR_MUTEX: &str = "the evaluations mutex is not poisoned: nothing panics under it";
 
+/// A closure's evaluation and the version it was evaluated at.
+type Held<W> = (i64, Arc<State<W>>);
+
 pub struct Evaluations<W> {
-    entries: Mutex<HashMap<Identifier, (i64, Arc<State<W>>)>>,
+    entries: Mutex<HashMap<Identifier, Held<W>>>,
 }
 
 impl<W> Default for Evaluations<W> {
