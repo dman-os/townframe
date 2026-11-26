@@ -34,6 +34,7 @@ use clay_dioxus_kit::ChipVariant;
 use clay_dioxus_kit::PanelPage;
 use clay_dioxus_kit::Separator;
 use clay_dioxus_kit::Status;
+use clay_dioxus_kit::part;
 use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use intxt_core::work::PullState;
