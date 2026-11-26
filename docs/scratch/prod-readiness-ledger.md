@@ -1281,6 +1281,12 @@ mtimes can't keep stale cargo units. The lead verifies in its own mothership wor
   panics "CLI binary not found" under mbx's test runner. The test locates the CLI binary
   relative to its own exe, and mbx-test-runner places exes under `debug/build/<crate>/<hash>/`.
   It passed in an earlier run tonight, so it depends on where the CLI binary was built.
-  Reported to claytxt (mbx owner). Next: confirm the exe-path assumption and pin it.
+  **claytxt's diagnosis: not mbx.** `debug/build/<pkg>/<hash>/` is Cargo's newer build-dir
+  layout; only final bins are uplifted to `target/debug/`. Popping two components off
+  `current_exe` is a layout assumption. Next session:
+  - check the fork's toolchain and `build-dir`/`-Zbuild-dir-new-layout` config;
+  - patch the test to locate the uplifted CLI bin from the target dir (walk up to the profile
+    dir containing `<bin>`), or use `env!("CARGO_BIN_EXE_<name>")` if it is an integration test;
+  - keep the explicit `cargo build -p subduction_cli` precondition.
 - **The laptop clone lost branch 21's ref file** (p3N damage). It was recreated from mothership;
   nothing was lost.
