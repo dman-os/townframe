@@ -22,6 +22,7 @@ pub use foundation::ThemeRoot;
 pub use foundation::ThemeStyles;
 pub use headless::Orientation;
 pub use headless::Status;
+pub use headless::part;
 pub use headless::alert::Alert;
 pub use headless::app_bar::AppBar;
 pub use headless::button::Button;

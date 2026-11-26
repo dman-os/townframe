@@ -7,6 +7,7 @@
 //! `aria-current` and `data-current`. It is a native
 //! `<button type="button">`, so Enter and Space activate it wherever the renderer has focus; a
 //! disabled one ignores its click whatever the renderer does.
+use super::part;
 use dioxus::prelude::*;
 
 /// The weight of a button among its neighbours.
@@ -83,6 +84,14 @@ pub fn Button(
     rsx! {
         button {
             class: "ct-button",
+            "part": part(
+                "button",
+                &[
+                    ("variant", Some(variant.as_str())),
+                    ("size", Some(size.as_str())),
+                    ("state", pressed.map(|pressed| if pressed { "on" } else { "off" })),
+                ],
+            ),
             r#type: "button",
             disabled,
             "aria-label": label,
@@ -158,6 +167,8 @@ mod tests {
         assert_eq!(page.attr(button, "type").as_deref(), Some("button"));
         let label = page.children(button)[0];
         assert_eq!(page.attr(label, "part").as_deref(), Some("button-label"));
+        assert_eq!(page.attr(button, "part").as_deref(), Some("button variant-primary size-md"));
+        page.assert_axes_mirrored(button);
         // Nothing but vocabulary: no state a plain button does not have.
         assert_eq!(page.attr(button, "aria-pressed"), None);
         assert_eq!(page.attr(button, "data-state"), None);

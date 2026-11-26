@@ -135,3 +135,25 @@ pub(crate) fn focus_on_mount(event: MountedEvent) {
             .expect("the renderer must be able to focus a modal panel");
     });
 }
+
+/// The value of a `part` attribute: the part's own name, then one token per enumerated axis it
+/// carries, `<axis>-<value>` (`tabs-tab state-active`, `button variant-outline size-md`). A part
+/// is what `::part()` selects by and it takes no attribute selectors, so every `data-state`,
+/// `data-variant`, `data-size`, `data-status`, `data-orientation` and similar axis on an element is
+/// mirrored here, and an outside stylesheet can select it (ADR 059). An axis that is absent
+/// (`None`) adds no token, as its `data-*` attribute is absent. The first token is always the name.
+pub fn part(name: &str, axes: &[(&str, Option<&str>)]) -> String {
+    let mut value = String::with_capacity(
+        name.len() + axes.iter().map(|(axis, v)| v.map_or(0, |v| axis.len() + v.len() + 2)).sum::<usize>(),
+    );
+    value.push_str(name);
+    for (axis, axis_value) in axes {
+        if let Some(axis_value) = axis_value {
+            value.push(' ');
+            value.push_str(axis);
+            value.push('-');
+            value.push_str(axis_value);
+        }
+    }
+    value
+}

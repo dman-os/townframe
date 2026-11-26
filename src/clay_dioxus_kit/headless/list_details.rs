@@ -22,6 +22,7 @@ use super::sections::SectionPane;
 use super::sections::Sections;
 use super::sections::Split;
 use crate::WidthClass;
+use super::part;
 use dioxus::prelude::*;
 
 /// What the list and the details can ask of the scaffold; obtained with [`use_list_details`].
@@ -113,16 +114,25 @@ pub fn ListDetails(
             None => (list_name, single),
         };
         return rsx! {
-            div { class: "ct-list-details", "data-state": "split",
+            div {
+                class: "ct-list-details",
+                "part": part("list-details", &[("state", Some("split"))]),
+                "data-state": "split",
                 Sections { label, panes, split, on_resize }
             }
         };
     }
     let covered = details.is_some();
     rsx! {
-        div { class: "ct-list-details", "data-state": "stacked",
+        div {
+            class: "ct-list-details",
+            "part": part("list-details", &[("state", Some("stacked"))]),
+            "data-state": "stacked",
             div {
-                "part": "list-details-list",
+                "part": part(
+                    "list-details-list",
+                    &[("state", Some(if covered { "covered" } else { "idle" }))],
+                ),
                 "data-state": if covered { "covered" } else { "idle" },
                 role: "region",
                 "aria-label": "{list_name}",
@@ -228,7 +238,7 @@ mod tests {
                         },
                     );
                     let inner = page.children(region)[0];
-                    assert_eq!(page.attr(inner, "part").as_deref(), Some(part));
+                    assert_eq!(page.part_name(inner).as_deref(), Some(part));
                 }
             } else {
                 assert_eq!(page.parts(root), parts);

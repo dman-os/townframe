@@ -11,6 +11,7 @@
 //!
 //! A chip that both toggles and removes would nest a button in a button, so it is refused.
 use super::Status;
+use super::part;
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -63,6 +64,14 @@ pub fn Chip(
         return rsx! {
             button {
                 class: "ct-chip",
+                "part": part(
+                    "chip",
+                    &[
+                        ("variant", Some(variant)),
+                        ("status", status),
+                        ("state", Some(if selected { "on" } else { "off" })),
+                    ],
+                ),
                 r#type: "button",
                 "aria-pressed": if selected { "true" } else { "false" },
                 "data-variant": variant,
@@ -74,7 +83,11 @@ pub fn Chip(
         };
     }
     rsx! {
-        span { class: "ct-chip", "data-variant": variant, "data-status": status,
+        span {
+            class: "ct-chip",
+            "part": part("chip", &[("variant", Some(variant)), ("status", status)]),
+            "data-variant": variant,
+            "data-status": status,
             span { "part": "chip-label", "{label}" }
             if let Some(on_remove) = on_remove {
                 button {

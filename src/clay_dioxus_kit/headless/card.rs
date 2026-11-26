@@ -5,6 +5,7 @@
 //! same axis and colour roles as `Alert`; absent is neutral). A card has no role of its own: it is a visual grouping, and a
 //! caller who wants it announced names it with a heading inside the header.
 use super::Status;
+use super::part;
 use dioxus::prelude::*;
 
 /// How a card sets itself off from its surroundings: by fill, one step on the surface ladder, never
@@ -44,6 +45,10 @@ pub fn Card(
     rsx! {
         div {
             class: "ct-card",
+            "part": part(
+                "card",
+                &[("variant", Some(variant.as_str())), ("status", status.map(Status::as_str))],
+            ),
             "data-variant": variant.as_str(),
             "data-status": status.map(Status::as_str),
             {children}
@@ -98,7 +103,7 @@ mod tests {
         let parts: Vec<_> = page
             .children(card)
             .into_iter()
-            .map(|part| page.attr(part, "part").expect("every child is a part"))
+            .map(|part| page.part_name(part).expect("every child is a part"))
             .collect();
         assert_eq!(parts, ["card-header", "card-content", "card-footer"]);
     }

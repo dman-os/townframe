@@ -625,7 +625,7 @@ mod rendered {
         let root = page.by_class("ct-scrub-strip");
         page.children(root)
             .into_iter()
-            .filter(|part| page.attr(*part, "part").as_deref() == Some("scrub-strip-marker"))
+            .filter(|part| page.part_name(*part).as_deref() == Some("scrub-strip-marker"))
             .map(|marker| page.text(marker))
             .collect()
     }
@@ -779,7 +779,7 @@ mod rendered {
         for marker in page
             .children(root)
             .into_iter()
-            .filter(|part| page.attr(*part, "part").as_deref() == Some("scrub-strip-marker"))
+            .filter(|part| page.part_name(*part).as_deref() == Some("scrub-strip-marker"))
         {
             assert_eq!(
                 page.custom_property(marker, "--ct-strip-push").as_deref(),

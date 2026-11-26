@@ -4,6 +4,7 @@
 //! `role="none"` (assistive technology skips it); one that divides content a reader should hear
 //! about is `role="separator"` with `aria-orientation`.
 use super::Orientation;
+use super::part;
 use dioxus::prelude::*;
 
 #[component]
@@ -16,6 +17,7 @@ pub fn Separator(
     rsx! {
         div {
             class: "ct-separator",
+            "part": part("separator", &[("orientation", Some(orientation.as_str()))]),
             role: if decorative { "none" } else { "separator" },
             "aria-orientation": if decorative { None } else { Some(orientation.as_str()) },
             "data-orientation": orientation.as_str(),
