@@ -11,7 +11,6 @@ use utils_rs::testing::alloc_count::Counted;
 use utils_rs::testing::alloc_count::CountingAllocator;
 use utils_rs::testing::alloc_count::measure;
 
-#[path = "../benches/workloads/mod.rs"]
 mod workloads;
 
 #[global_allocator]
@@ -117,7 +116,6 @@ fn a_point_read_does_not_grow_with_the_set() {
         let state = workloads::inserted(n);
         measure(|| workloads::point_read(state)).1
     });
-    let _ = high;
     // The answer is one row at both sizes, so the allocations are the same to within noise.
     let grew = ratio(low.allocations, high.allocations);
     assert!(
