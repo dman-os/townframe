@@ -10,34 +10,34 @@ SELECT s
      , lvl
      , :epoch
   FROM (
-         SELECT d.subject AS s
-              , d.audience AS n
+         SELECT nw.subject AS s
+              , nw.audience AS n
               , lv.lvl AS lvl
-           FROM keyline_new d
-           JOIN keyline_level lv ON lv.lvl <= d.power
-          WHERE d.kind = 0
-            AND d.audience <> d.subject
-            AND /*GROUND*/ (d.issuer = d.subject
+           FROM keyline_new nw
+           JOIN keyline_level lv ON lv.lvl <= nw.power
+          WHERE nw.kind = 0
+            AND nw.audience <> nw.subject
+            AND /*GROUND*/ (nw.issuer = nw.subject
                             OR EXISTS (SELECT 1
                                          FROM keyline_reach f2
-                                        WHERE f2.s = d.subject
-                                          AND f2.n = d.issuer
+                                        WHERE f2.s = nw.subject
+                                          AND f2.n = nw.issuer
                                           AND f2.lvl = lv.lvl))
           UNION ALL
          SELECT f1.s
-              , d.audience
+              , nw.audience
               , lv.lvl
-           FROM keyline_new d
-           JOIN keyline_level lv ON lv.lvl <= d.power
-           JOIN keyline_reach f1 ON f1.n = d.subject AND f1.lvl = lv.lvl
-          WHERE d.kind = 0
+           FROM keyline_new nw
+           JOIN keyline_level lv ON lv.lvl <= nw.power
+           JOIN keyline_reach f1 ON f1.n = nw.subject AND f1.lvl = lv.lvl
+          WHERE nw.kind = 0
             AND /*COMPOSE*/ 1 = 1
-            AND d.audience <> f1.s
-            AND /*GROUND*/ (d.issuer = d.subject
+            AND nw.audience <> f1.s
+            AND /*GROUND*/ (nw.issuer = nw.subject
                             OR EXISTS (SELECT 1
                                          FROM keyline_reach f2
-                                        WHERE f2.s = d.subject
-                                          AND f2.n = d.issuer
+                                        WHERE f2.s = nw.subject
+                                          AND f2.n = nw.issuer
                                           AND f2.lvl = lv.lvl))
        )
  WHERE true

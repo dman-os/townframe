@@ -5,6 +5,6 @@ SELECT d.digest AS delegation
      , d.issuer AS issuer
      , d.audience AS audience
      , r.issuer AS revoker
-  FROM keyline_root rt
-  JOIN keyline_certificates d ON d.subject = rt.s
+  FROM keyline_certificates d
   JOIN keyline_certificates r ON r.revoke = d.digest
+ WHERE d.subject IN (SELECT s FROM keyline_root)

@@ -10,12 +10,13 @@ SELECT d.subject
      , d.audience
      , lv.lvl
      , :epoch
-  FROM keyline_root rt
-  JOIN keyline_certificates d ON d.subject = rt.s AND d.issuer = d.subject
+  FROM keyline_certificates d
   JOIN keyline_level lv ON lv.lvl <= d.power
  CROSS JOIN keyline_ctx_use x
   LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
- WHERE COALESCE(dp.total, 0) = 0
+ WHERE d.subject IN (SELECT s FROM keyline_root)
+   AND d.issuer = d.subject
+   AND COALESCE(dp.total, 0) = 0
    AND d.audience <> d.subject
    AND NOT EXISTS (SELECT 1 FROM keyline_excl e WHERE e.ctx = x.ctx AND e.node = d.subject)
    AND /*OWN*/ (NOT EXISTS (SELECT 1 FROM keyline_excl e WHERE e.ctx = COALESCE(dp.ctx, 0) AND e.node = d.subject))

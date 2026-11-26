@@ -6,10 +6,10 @@ SELECT ctx
          SELECT 0 AS ctx
           UNION
          SELECT dp.ctx
-           FROM keyline_root rt
-           JOIN keyline_certificates d ON d.subject = rt.s
+           FROM keyline_certificates d
            JOIN keyline_dispute dp ON dp.delegation = d.digest
-          WHERE dp.total = 0
+          WHERE d.subject IN (SELECT s FROM keyline_root)
+            AND dp.total = 0
        )
  WHERE true
     ON CONFLICT DO NOTHING
