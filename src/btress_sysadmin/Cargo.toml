@@ -105,6 +105,12 @@ bin-features = ["ssr"]
 # closure keeps root-workspace feature unification out of hydrate builds.
 [workspace]
 
+# hyper plus a fix for the h1 server panicking on wasm32-unknown-unknown (see the root
+# Cargo.toml); kept the same in every workspace that has hyper in its graph. The upstream PR
+# is not opened yet.
+[patch.crates-io]
+hyper = { git = "https://github.com/dman-os/hyper", rev = "388ad2634fe3a61d350690e02826ef021ced7458" }
+
 [profile.dev]
 opt-level = 3
 

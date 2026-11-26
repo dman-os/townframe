@@ -124,6 +124,7 @@ fn replay_round_over_every_target_is_linear() {
             targets: (0..n).map(|row| (route(row).0, 0)).collect(),
             limit: 1024,
             hold_ms: 0,
+            linger_ms: None,
         };
         measure(|| {
             let page = block_on(responder.page(&me, |round| {

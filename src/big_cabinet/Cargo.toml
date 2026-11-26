@@ -52,6 +52,8 @@ tokio = { workspace = true, features = ["rt"] }
 big_sync = { workspace = true, features = ["test-support"] }
 big_repo = { workspace = true, features = ["test-support"] }
 iroh.workspace = true
+service_client_native_rs = { workspace = true, features = ["xrpc"] }
+service_utils_rs = { workspace = true, features = ["net"] }
 subduction_iroh.workspace = true
 insta = { workspace = true, features = ["json"] }
 proptest.workspace = true

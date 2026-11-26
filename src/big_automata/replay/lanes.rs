@@ -21,7 +21,9 @@
 //! 3. **At most one round per lane in flight.** A lane's next round goes out only after its
 //!    previous one is answered, failed or lost.
 //! 4. **Holds.** A `Live` round may wait up to `Config::hold` for rows; a `Bulk` round never
-//!    waits (`hold_ms = 0`).
+//!    waits (`hold_ms = 0`). A `Live` round also asks the server to linger after its first row
+//!    (`Config::live_linger_ms`); a `Bulk` round asks for none unless `Config::bulk_linger_ms`
+//!    says so.
 //! 5. **Moving lanes takes effect at the next round.** A route that changes lane while a
 //!    round naming it is in flight stays in that round; its answer still applies (the parent
 //!    matches answers to the cursor the round was asked from, replay law 11).
@@ -80,6 +82,12 @@ pub(crate) type CallId = u64;
 pub(crate) struct Config {
     /// How long a `Live` round may wait for rows.
     pub hold_ms: u32,
+    /// The linger a `Live` round asks of the server after its first row (replay law 13), or
+    /// `None` to ask for none. The server caps it.
+    pub live_linger_ms: Option<u32>,
+    /// The linger a `Bulk` round asks for. `Bulk` has no latency to protect, so the default is
+    /// `None`: its rounds answer as soon as they have a row.
+    pub bulk_linger_ms: Option<u32>,
     /// The most rows a `Live` round asks for; `Bulk` gets the rest of the window (law 6).
     pub live_limit: usize,
     /// The rows a `Bulk` round waits for, up to `bulk_linger` (law 9).
@@ -332,6 +340,10 @@ impl Lanes {
                 Lane::Live => self.config.hold_ms,
                 Lane::Bulk => 0,
             };
+            let linger_ms = match lane {
+                Lane::Live => self.config.live_linger_ms,
+                Lane::Bulk => self.config.bulk_linger_ms,
+            };
             // A route in the other lane's round in flight waits for it (law 2), whichever
             // lane it is in now.
             let page = client.round(
@@ -347,6 +359,7 @@ impl Lanes {
                 },
                 u32::try_from(limit).unwrap_or(u32::MAX),
                 hold_ms,
+                linger_ms,
             );
             let Some(page) = page else {
                 if lane == Lane::Bulk {

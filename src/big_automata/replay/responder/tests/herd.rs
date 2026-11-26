@@ -114,10 +114,15 @@ struct Held {
 }
 
 impl Held {
-    fn open(store: &Counted, timer: &ManualTimer, linger: Duration, route: Route) -> Self {
+    /// `cap` is the responder's linger cap, or the default cap when `None`.
+    fn open(store: &Counted, timer: &ManualTimer, cap: Option<Duration>, route: Route) -> Self {
+        let mut responder = Responder::new(store.clone(), timer.clone());
+        if let Some(cap) = cap {
+            responder = responder.with_linger_cap(cap);
+        }
         let mut held = Self {
             server: default(),
-            responder: Responder::new(store.clone(), timer.clone()).with_linger(linger),
+            responder,
         };
         let update = UpdateSession {
             session_id: session(),
@@ -134,17 +139,31 @@ impl Held {
         held
     }
 
-    /// The round: target 1 from `cursor`, a page of `limit` rows, held for a minute.
+    /// The round: target 1 from `cursor`, a page of `limit` rows, held for a minute and
+    /// asking to linger `linger_ms`.
     fn round(
         &mut self,
         cursor: Rev,
         limit: u32,
+        linger_ms: Option<u32>,
+    ) -> Pin<Box<dyn Future<Output = SessionPage> + '_>> {
+        self.round_held(cursor, limit, 60_000, linger_ms)
+    }
+
+    /// [`Held::round`] held for `hold_ms`.
+    fn round_held(
+        &mut self,
+        cursor: Rev,
+        limit: u32,
+        hold_ms: u32,
+        linger_ms: Option<u32>,
     ) -> Pin<Box<dyn Future<Output = SessionPage> + '_>> {
         let request = PageSession {
             session_id: session(),
             targets: vec![(1, cursor)],
             limit,
-            hold_ms: 60_000,
+            hold_ms,
+            linger_ms,
         };
         let Self { server, responder } = self;
         Box::pin(async move {
@@ -191,11 +210,11 @@ fn held_rounds_on_disjoint_parts_cost_one_reread_per_commit() {
         )],
     ));
     let mut helds = (1..=ROUNDS)
-        .map(|part| Held::open(&store, &timer, Duration::ZERO, part_route(part)))
+        .map(|part| Held::open(&store, &timer, None, part_route(part)))
         .collect::<Vec<_>>();
     let mut rounds = helds
         .iter_mut()
-        .map(|held| held.round(head, 100))
+        .map(|held| held.round(head, 100, None))
         .collect::<Vec<_>>();
     let wakes = (0..ROUNDS)
         .map(|_| Arc::new(Wakes::default()))
@@ -246,8 +265,13 @@ fn a_linger_gathers_a_burst_of_commits_into_one_answer() {
     let store = store();
     let timer = ManualTimer::default();
     let head = block_on(commit(&store.inner, vec![grant(&[(1, 0)])]));
-    let mut held = Held::open(&store, &timer, Duration::from_millis(100), part_route(1));
-    let mut round = held.round(head, 100);
+    let mut held = Held::open(
+        &store,
+        &timer,
+        Some(Duration::from_millis(100)),
+        part_route(1),
+    );
+    let mut round = held.round(head, 100, Some(100));
     let wakes = Arc::new(Wakes::default());
     assert!(poll_counted(&mut round, &wakes).is_pending());
     assert_eq!(store.reads(), 1);
@@ -282,8 +306,8 @@ fn a_full_page_ends_the_linger_early() {
     let store = store();
     let timer = ManualTimer::default();
     let head = block_on(commit(&store.inner, vec![grant(&[(1, 0)])]));
-    let mut held = Held::open(&store, &timer, Duration::from_secs(60), part_route(1));
-    let mut round = held.round(head, 2);
+    let mut held = Held::open(&store, &timer, Some(Duration::from_secs(60)), part_route(1));
+    let mut round = held.round(head, 2, Some(60_000));
     let wakes = Arc::new(Wakes::default());
     assert!(poll_counted(&mut round, &wakes).is_pending());
 
@@ -309,8 +333,8 @@ fn a_revocation_wakes_a_held_object_route() {
         &store.inner,
         vec![grant(&[(1, 0)]), set(&[(1, 10)]), add(&[(1, 1)])],
     ));
-    let mut held = Held::open(&store, &timer, Duration::ZERO, obj_route(1));
-    let mut round = held.round(head, 100);
+    let mut held = Held::open(&store, &timer, None, obj_route(1));
+    let mut round = held.round(head, 100, None);
     let wakes = Arc::new(Wakes::default());
     assert!(poll_counted(&mut round, &wakes).is_pending());
     assert_eq!(store.reads(), 1);
@@ -326,4 +350,134 @@ fn a_revocation_wakes_a_held_object_route() {
     assert_eq!(page.events, []);
     assert_eq!(page.verdicts, [(1, Verdict::Refused)]);
     assert!(revoked > head);
+}
+
+/// Part 1 granted, and a held round on it ready to park.
+fn parked(store: &Counted, timer: &ManualTimer, cap: Option<Duration>) -> (Held, Rev, Arc<Wakes>) {
+    let head = block_on(commit(&store.inner, vec![grant(&[(1, 0)])]));
+    (
+        Held::open(store, timer, cap, part_route(1)),
+        head,
+        default(),
+    )
+}
+
+/// A commit that adds object `object` to part 1, as one row.
+fn one_row(store: &Counted, object: u8) -> Rev {
+    block_on(commit(
+        &store.inner,
+        vec![set(&[(object, object)]), add(&[(object, 1)])],
+    ))
+}
+
+/// The linger is the client's hint, capped by the server: a hint over the cap lingers the cap.
+#[test]
+fn a_hint_over_the_cap_lingers_the_cap() {
+    let store = store();
+    let timer = ManualTimer::default();
+    let (mut held, head, wakes) = parked(&store, &timer, Some(Duration::from_millis(100)));
+    let mut round = held.round(head, 100, Some(10_000));
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+
+    one_row(&store, 1);
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+    assert_eq!(timer.outstanding(), [Duration::from_millis(100)]);
+    timer.expire();
+    assert!(poll_counted(&mut round, &wakes).is_ready());
+}
+
+/// A hint under the cap lingers the hint, not the cap.
+#[test]
+fn a_hint_under_the_cap_lingers_the_hint() {
+    let store = store();
+    let timer = ManualTimer::default();
+    let (mut held, head, wakes) = parked(&store, &timer, Some(Duration::from_millis(100)));
+    let mut round = held.round(head, 100, Some(20));
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+
+    one_row(&store, 1);
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+    assert_eq!(timer.outstanding(), [Duration::from_millis(20)]);
+}
+
+/// The default cap is 50 ms, for a responder nobody configured.
+#[test]
+fn the_default_cap_is_fifty_milliseconds() {
+    assert_eq!(DEFAULT_LINGER_CAP, Duration::from_millis(50));
+    let store = store();
+    let timer = ManualTimer::default();
+    let (mut held, head, wakes) = parked(&store, &timer, None);
+    let mut round = held.round(head, 100, Some(u32::MAX));
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+
+    one_row(&store, 1);
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+    assert_eq!(timer.outstanding(), [Duration::from_millis(50)]);
+}
+
+/// No hint is no linger, whatever the cap: the first commit that carries a row answers.
+#[test]
+fn no_hint_answers_at_the_first_commit() {
+    let store = store();
+    let timer = ManualTimer::default();
+    let (mut held, head, wakes) = parked(&store, &timer, Some(Duration::from_secs(10)));
+    let mut round = held.round(head, 100, None);
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+
+    let first = one_row(&store, 1);
+    let Poll::Ready(page) = poll_counted(&mut round, &wakes) else {
+        panic!("a round with no hint lingers");
+    };
+    assert_eq!(page.events, [changed(first, 1, &[1], 1)]);
+    assert_eq!(store.reads(), 2);
+}
+
+/// A burst inside the hinted window is one answer and one read.
+#[test]
+fn a_burst_inside_the_hinted_window_answers_once() {
+    let store = store();
+    let timer = ManualTimer::default();
+    let (mut held, head, wakes) = parked(&store, &timer, None);
+    let mut round = held.round(head, 100, Some(30));
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+
+    let first = one_row(&store, 1);
+    one_row(&store, 2);
+    let last = one_row(&store, 3);
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+    assert_eq!(store.reads(), 1, "nothing is read while the window runs");
+    assert_eq!(timer.outstanding(), [Duration::from_millis(30)]);
+
+    timer.expire();
+    let Poll::Ready(page) = poll_counted(&mut round, &wakes) else {
+        panic!("the window ended");
+    };
+    assert_eq!(page.events.len(), 3);
+    assert_eq!(page.events[0], changed(first, 1, &[1], 1));
+    assert_eq!(page.events[2], changed(last, 3, &[1], 3));
+    assert_eq!(store.reads(), 2, "three commits, one read");
+}
+
+/// A hint longer than the round's own hold never holds past the hold's deadline: the window
+/// ends there, with the commit's rows.
+#[test]
+fn a_hint_past_the_deadline_never_holds_past_it() {
+    let store = store();
+    let timer = ManualTimer::default();
+    let (mut held, head, wakes) = parked(&store, &timer, Some(Duration::from_secs(60)));
+    let mut round = held.round_held(head, 100, 30, Some(60_000));
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+
+    let first = one_row(&store, 1);
+    assert!(poll_counted(&mut round, &wakes).is_pending());
+    assert_eq!(
+        timer.outstanding(),
+        [Duration::from_millis(30)],
+        "the sleep is the deadline, not the hint"
+    );
+    timer.expire();
+    let Poll::Ready(page) = poll_counted(&mut round, &wakes) else {
+        panic!("the deadline ended the hold");
+    };
+    assert_eq!(page.events, [changed(first, 1, &[1], 1)]);
 }

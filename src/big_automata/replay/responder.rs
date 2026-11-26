@@ -32,6 +32,10 @@ use crate::rev::Rev;
 #[cfg(test)]
 mod tests;
 
+/// The default longest a client's linger hint may hold a round open (see
+/// [`Responder::with_linger_cap`]).
+pub const DEFAULT_LINGER_CAP: Duration = Duration::from_millis(50);
+
 /// Serves one client connection's replay requests from a part store, one at a time. It owns
 /// every buffer a round needs and reuses them across rounds, so a round allocates only what
 /// the page it hands out holds.
@@ -44,9 +48,9 @@ pub struct Responder<S, T> {
     timer: T,
     /// The store's long-poll hub, held for the responder's life.
     polls: LongPollHub<LogInterest>,
-    /// How long a hold waits, after the first commit that concerns it, for more to arrive
-    /// (see [`Responder::with_linger`]).
-    linger: Duration,
+    /// The longest a hold may linger after the first commit that concerns it, whatever the
+    /// client's hint (see [`Responder::with_linger_cap`]).
+    linger_cap: Duration,
     /// What the current round's hold watches.
     interests: Vec<LogInterest>,
     round: Round,
@@ -69,7 +73,7 @@ where
             store,
             timer,
             polls,
-            linger: Duration::ZERO,
+            linger_cap: DEFAULT_LINGER_CAP,
             interests: default(),
             round: default(),
             read: default(),
@@ -82,12 +86,14 @@ where
         }
     }
 
-    /// Let a hold wait `linger` after the first commit that concerns it, or until its page is
-    /// full, before it answers, so a burst of commits is one answer instead of one each. The
-    /// window is fixed from that first commit and never extends past the hold's own deadline.
-    /// The default is no linger: a hold answers as soon as a commit carries it a row.
-    pub fn with_linger(mut self, linger: Duration) -> Self {
-        self.linger = linger;
+    /// Cap the linger a client may ask for at `cap`. A hold waits `min(hint, cap)` after the
+    /// first commit that concerns it, or until its page is full, before it answers, so a burst
+    /// of commits is one answer instead of one each. The window is fixed from that first commit
+    /// and never extends past the hold's own deadline. A round with no hint does not linger: it
+    /// answers as soon as a commit carries it a row. The default cap is
+    /// [`DEFAULT_LINGER_CAP`].
+    pub fn with_linger_cap(mut self, cap: Duration) -> Self {
+        self.linger_cap = cap;
         self
     }
 
@@ -123,7 +129,7 @@ where
             self.interests.clear();
             self.round.routes().interests_into(&mut self.interests);
             let linger = Linger {
-                window: self.linger,
+                window: self.round.linger().min(self.linger_cap),
                 min_amount: self.round.limits().max_entries.get() as u64,
             };
             while self.read.rows.entries.is_empty() {

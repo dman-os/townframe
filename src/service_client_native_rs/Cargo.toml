@@ -13,6 +13,10 @@ path = "lib.rs"
 default = []
 # The `Transport::Iroh` variant: XRPC to a peer over iroh streams.
 iroh = ["dep:service_client_iroh_rs"]
+# The `Transport::Xrpc` variant and `XrpcClient`: HTTP over TCP or a Unix socket through reqwest
+# and tokio's `net`, which have no browser build. Without it the crate is the portable core of
+# the client (direct and irpc transports, the websocket framing) and builds for wasm32.
+xrpc = ["dep:reqwest", "tokio/net"]
 
 [dependencies]
 rand.workspace = true
@@ -21,13 +25,15 @@ service_core_rs.workspace = true
 service_client_core_rs.workspace = true
 service_client_iroh_rs = { workspace = true, optional = true }
 futures.workspace = true
-tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
+# Channels, `select!` and the I/O traits only; the runtime is n0-future's.
+tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
+n0-future.workspace = true
 irpc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 http.workspace = true
 uuid = { version = "1", features = ["v7"] }
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 serde_urlencoded = "0.7"
 base64 = "0.22"
 sha1 = "0.10"

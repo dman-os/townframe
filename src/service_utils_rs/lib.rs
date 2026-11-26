@@ -26,6 +26,15 @@
 //! * Every long-lived component boots into an `(Arc<Self>, StopToken)` pair;
 //!   [`StopToken::stop`] cancels and then joins, in construction order reversed.
 //!
+//! # Portable core and native extras
+//!
+//! The crate builds for `wasm32-unknown-unknown`, so a browser node can host a service and
+//! serve it to peers. Everything above (hosts, admission, middleware, the XRPC router and, with
+//! `iroh-http`, the iroh protocol handler) is that portable core: it spawns and times through
+//! `n0_future`, takes its semaphores from `async-lock`, and uses `tokio::sync` for channels and
+//! watch only. The `net` feature adds the native extras that need tokio's runtime and sockets:
+//! serving a router over TCP or a Unix socket (`xrpc::serve*`, `xrpc::UnixConnectionAcceptor`).
+//!
 //! [`sample`] is the reference implementation and the layout new services
 //! should copy.
 

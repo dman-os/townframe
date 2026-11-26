@@ -133,6 +133,3 @@ pub(crate) mod object_jobs;
 pub(crate) mod peer;
 pub mod rpc;
 pub(crate) mod strategy;
-// FIXME(port): the old task bodies, disabled with `cfg(any())`; they become the driver's I/O.
-#[cfg(any())]
-mod tasks;

@@ -1,4 +1,3 @@
-use crate::xrpc::XrpcClient;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use irpc::Channels;
@@ -41,7 +40,8 @@ pub enum Transport<Proto: Service> {
     Direct(Arc<dyn InlineRoute<Proto>>, CallOrigin),
     /// Messages go through a same-node IRPC queue.
     Irpc(irpc::Client<Proto>, CallOrigin),
-    Xrpc(XrpcClient),
+    #[cfg(feature = "xrpc")]
+    Xrpc(crate::xrpc::XrpcClient),
     /// XRPC to a peer over iroh streams; unary only.
     #[cfg(feature = "iroh")]
     Iroh(service_client_iroh_rs::IrohHttp),
@@ -56,7 +56,8 @@ impl<Proto: Service> Transport<Proto> {
         Self::Irpc(client, origin)
     }
 
-    pub fn xrpc(client: XrpcClient) -> Self {
+    #[cfg(feature = "xrpc")]
+    pub fn xrpc(client: crate::xrpc::XrpcClient) -> Self {
         Self::Xrpc(client)
     }
 
@@ -75,6 +76,7 @@ impl<Proto: Service> Transport<Proto> {
             Self::Irpc(_, origin) => {
                 request.set_transport(TransportContext::Irpc { origin: *origin })
             }
+            #[cfg(feature = "xrpc")]
             Self::Xrpc(_) => {}
             #[cfg(feature = "iroh")]
             Self::Iroh(_) => {}
@@ -87,6 +89,7 @@ impl<Proto: Service> Clone for Transport<Proto> {
         match self {
             Self::Direct(host, origin) => Self::Direct(Arc::clone(host), *origin),
             Self::Irpc(client, origin) => Self::Irpc(client.clone(), *origin),
+            #[cfg(feature = "xrpc")]
             Self::Xrpc(client) => Self::Xrpc(client.clone()),
             #[cfg(feature = "iroh")]
             Self::Iroh(client) => Self::Iroh(client.clone()),
@@ -99,6 +102,7 @@ impl<Proto: Service> std::fmt::Debug for Transport<Proto> {
         formatter.write_str(match self {
             Self::Direct(..) => "direct",
             Self::Irpc(..) => "irpc",
+            #[cfg(feature = "xrpc")]
             Self::Xrpc(_) => "xrpc",
             #[cfg(feature = "iroh")]
             Self::Iroh(_) => "iroh",
@@ -144,6 +148,7 @@ where
                             })?
                             .map_err(ClientError::Method)
                     }
+                    #[cfg(feature = "xrpc")]
                     Self::Xrpc(client) => {
                         request.context.validate()?;
                         let Envelope {
@@ -206,6 +211,7 @@ where
                             .map_err(|error| ClientError::transport(error, true))?;
                         Ok(frames(receiver, scope))
                     }
+                    #[cfg(feature = "xrpc")]
                     Self::Xrpc(client) => {
                         let Envelope {
                             context,
@@ -243,7 +249,7 @@ async fn within_deadline<T, E: From<ContextError>>(
     operation: impl Future<Output = Result<T, ClientError<E>>>,
 ) -> Result<T, ClientError<E>> {
     match context.remaining_budget() {
-        Some(budget) => tokio::time::timeout(budget, operation)
+        Some(budget) => n0_future::time::timeout(budget, operation)
             .await
             .unwrap_or_else(|_| Err(ContextError::DeadlineExceeded.into())),
         None => operation.await,
@@ -257,7 +263,7 @@ fn bounded<P: Subscription>(subscribed: Subscribed<P>, context: RequestContext) 
     let frames = futures::stream::unfold((frames, context), |(mut frames, context)| async move {
         let frame = match context.remaining_budget() {
             Some(budget) if budget.is_zero() => Some(Err(ContextError::DeadlineExceeded.into())),
-            Some(budget) => tokio::time::timeout(budget, frames.next())
+            Some(budget) => n0_future::time::timeout(budget, frames.next())
                 .await
                 .unwrap_or_else(|_| Some(Err(ContextError::DeadlineExceeded.into()))),
             None => frames.next().await,

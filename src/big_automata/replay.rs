@@ -106,7 +106,10 @@
 //!     The wait is a [long-poll](crate::long_poll) on the routes the round names, so a commit on
 //!     other routes neither wakes it nor costs it a read, and a server may linger a short while
 //!     after the first commit that concerns it (up to a full page) to answer a burst as one
-//!     page.
+//!     page. The client hints how long with `linger_ms` (it knows whether it is latency
+//!     sensitive); the server lingers the lesser of the hint and its own cap, never past the
+//!     round's deadline, and a round with no hint does not linger. Lingering is timing only,
+//!     like the hold: it changes when a round answers, never what it may carry.
 //!
 //! **Limits**
 //!
