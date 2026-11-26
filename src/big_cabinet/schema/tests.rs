@@ -294,12 +294,13 @@ fn reference_tags_select_the_datums_that_declare_references() {
     ])
     .unwrap();
     let tags = repo.reference_tags();
-    // The core branch datum carries a `DatumPin`, so it is selected alongside the
+    // The core branch and dpath datums carry `DatumPin`s, so they are selected alongside the
     // registered referencing datum; the plain one and dmeta are not.
     assert_eq!(
         tags,
         vec![
             "org.example.daybook.branch".to_owned(),
+            "org.example.daybook.dpath".to_owned(),
             referencing.to_owned()
         ]
     );

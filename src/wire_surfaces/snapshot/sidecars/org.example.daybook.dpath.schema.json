@@ -1,0 +1,26 @@
+{
+  "$defs": {
+    "DpathClaim": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "The value of one dpath claim. It is open like every datum object: a member a newer writer adds\nsurvives a round trip through this build.",
+      "properties": {
+        "targets": {
+          "description": "The datums of the claiming document that carry the path. Absent means the document's\nprimary content, whichever datum that is; present names them, each at the heads its pin\ncarries or at the current frontier.",
+          "items": {
+            "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "DpathClaim",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.dpath"
+    }
+  },
+  "$ref": "#/$defs/DpathClaim",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

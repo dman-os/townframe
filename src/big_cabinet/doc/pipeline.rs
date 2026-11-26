@@ -5,6 +5,7 @@ use super::commands::Kind;
 use super::commands::Row;
 use super::commands::State;
 use super::*;
+use big_cabinet_core::dpath::DpathClaim;
 
 /// What the real pass of a write stages from the dry pass: the claims it derived and the
 /// signatures over them.
@@ -132,6 +133,14 @@ impl DocsService {
         }
         set.into_iter()
             .map(|(key, value)| {
+                if key.tag().as_str() == DpathClaim::ID {
+                    DpathClaim::slot_dpath(key.slot_bytes()).map_err(|error| {
+                        DocsError::InvalidSlot {
+                            datum_key: key.clone(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                }
                 let schema = self
                     .schema_repo
                     .require_for_write(key.tag().as_str())

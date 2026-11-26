@@ -1,0 +1,21 @@
+{
+  "defs": {
+    "main": {
+      "nullable": [
+        "targets"
+      ],
+      "properties": {
+        "targets": {
+          "items": {
+            "ref": "org.example.daybook.defs#datumPin",
+            "type": "ref"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.dpath",
+  "lexicon": 1
+}

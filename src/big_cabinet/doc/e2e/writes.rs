@@ -1,6 +1,7 @@
 //! The ordinary write surface: whole-datum values, explicit bases, and the four write modes.
 
 use super::*;
+use big_cabinet_core::dpath::DpathClaim;
 
 #[tokio::test]
 async fn a_created_document_reads_back_its_datums_at_the_creation_heads() {
@@ -293,6 +294,76 @@ async fn refused_writes_commit_nothing() {
         .await
         .unwrap();
     assert_eq!(read.heads, created.heads);
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_dpath_claim_is_admitted_only_under_a_slot_that_is_a_dpath() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let created = node
+        .create(&alice, "create", [(key("main"), note("x"))])
+        .await
+        .unwrap();
+    let document = &created.doc_id;
+    let claim = |slot: &[u8]| {
+        DatumKey::new(DpathClaim::ID, slot.to_vec()).expect("any non-empty slot is a key")
+    };
+    for slot in [
+        &b"/"[..],
+        b"inbox/a.md",
+        b"/a//b",
+        b"/a/",
+        b"/a/../b",
+        b"/caf\xe9",
+    ] {
+        let error = node
+            .write(
+                &alice,
+                document,
+                WriteMode::AtCurrent,
+                [(claim(slot), json!({}))],
+                [],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, DocsError::InvalidSlot { datum_key, .. } if *datum_key == claim(slot)),
+            "{slot:?}: {error:?}"
+        );
+    }
+    let refused = node
+        .read(&alice, document, At::Current, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.heads, created.heads,
+        "refused claims commit nothing"
+    );
+
+    let written = node
+        .write(
+            &alice,
+            document,
+            WriteMode::AtCurrent,
+            [
+                (claim(b"/inbox/a.md"), json!({})),
+                (claim(b"/inbox/b.md"), json!({"targets": []})),
+            ],
+            [],
+        )
+        .await
+        .unwrap();
+    let read = node
+        .read(&alice, document, At::Current, false)
+        .await
+        .unwrap();
+    assert_eq!(read.heads, written.heads);
+    assert_eq!(
+        read.datums.len(),
+        3,
+        "two independent claims beside the note"
+    );
     node.stop().await;
 }
 

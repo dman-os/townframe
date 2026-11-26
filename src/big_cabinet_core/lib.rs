@@ -6,6 +6,7 @@ pub mod authority;
 pub mod datum;
 pub mod dmeta;
 pub mod doc;
+pub mod dpath;
 pub mod drawer;
 pub mod query;
 pub mod reference;

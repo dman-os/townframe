@@ -22,6 +22,7 @@ use big_cabinet_core::datum::UniverseError;
 use big_cabinet_core::datum::admit_lexicon;
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
+use big_cabinet_core::dpath::DpathClaim;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerChildEntry;
 use big_cabinet_core::drawer::DrawerDocEntry;
@@ -43,6 +44,7 @@ static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
         Declaration::of::<Dmeta>().expect("dmeta is a well-formed datum declaration"),
         Declaration::of::<BranchPath>().expect("branch is a well-formed datum declaration"),
+        Declaration::of::<DpathClaim>().expect("dpath is a well-formed datum declaration"),
         Declaration::of::<Drawer>().expect("drawer is a well-formed datum declaration"),
         // A published union's members are carried as their own lexicons at admission, whether or
         // not the union is open.

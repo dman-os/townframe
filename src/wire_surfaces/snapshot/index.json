@@ -722,6 +722,15 @@
   {
     "crate": "big_cabinet",
     "kind": "object",
+    "nsid": "org.example.daybook.dpath",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
     "nsid": "org.example.daybook.drawer",
     "revision": null,
     "sidecar": true,

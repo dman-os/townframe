@@ -280,6 +280,10 @@ pub enum DocsError {
     SetAndRemoved { datum_key: DatumKey },
     #[error("datum {datum_key} value is invalid: {reason}")]
     InvalidValue { datum_key: DatumKey, reason: String },
+    /// A datum whose slot carries meaning (a dpath claim's slot is its dpath) was written under a
+    /// slot that does not spell one.
+    #[error("datum {datum_key} slot is invalid: {reason}")]
+    InvalidSlot { datum_key: DatumKey, reason: String },
     #[error(
         "datum {datum_key} value is too large: it needs {observed} {limit} and the limit is {maximum}"
     )]

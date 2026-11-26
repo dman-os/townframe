@@ -443,6 +443,13 @@ fn docs_error_wire() {
             },
         ),
         (
+            "error_invalid_slot",
+            DocsError::InvalidSlot {
+                datum_key: key("main"),
+                reason: "not a dpath".into(),
+            },
+        ),
+        (
             "error_conflict",
             DocsError::Conflict {
                 heads: vec![hash(3)],
