@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7230430503fc817bb43fbc4fe0c72b5c03eaeb42e7aa69fcecacb2c70ea4af59 # shrinks to ops = [Open(1), Restart, Open(1)]
+cc f3f0882256e3184deb3cb1908cddc3d0acff52705742fc61c366013b95ede3ca # shrinks to ops = [Epoch(526424464), Want(1, true), RoundDone(140515918093237501, true), RemoteWrite(0, false)]
+cc 354ffa16467e50413456efbedc699e712c21f52ca6e37a888806be87a0b8ca0c # shrinks to ops = [RemoteWrite(0, false)]
+cc bfa362601f8089a5bf014b42328f0edd74eb707edbe4d039def3415bf1064a04 # shrinks to ops = [RemoteWrite(1, false), RemoteWrite(0, false), GrantKeys(1), Feed(0), DocMail(34591553), Complete(6026590700388990886, false), Reports(11995662508915060449), Reports(9494661626562878835)]
+cc 660a081b3a95c0c6f00e2e8750d2b4559d9683a53f154fc16f161bb18f97cb62 # shrinks to ops = [RemoteWrite(0, false), Feed(0), Complete(0, false), Advance(3), Reports(0), Open(1), Reports(0), Reports(0), Reports(0), Open(0), Open(0), RemoteWrite(0, false), Open(0), Open(0)]
+cc 7e1565503ac2b1d69e48e2c2689aa32f80a9b5917a9aff029937ce8f965b70c3 # shrinks to ops = [Connect(0), Want(0, false), Want(0, true)]
+cc e444480d1c918ea08e4d9943a5352803d5d907143571fb5b68fdd19eb15c0138 # shrinks to ops = [RemoteWrite(2, false), Feed(0), RemoteWrite(0, false), Reports(0), GrantKeys(2), Complete(0, false), RemoteWrite(2, false), Epoch(6), Reports(3395797845955495809), DocMail(9096965868460801533), Reports(6647400874008274867), Reports(16497844526068204993), Complete(6858541042469513586, false), Reports(952728016655894003)]
+cc 38f1a63314939c082b376f74e6e5fa76a9500dff52e76c269ab7a2cfb3f44f10 # shrinks to ops = [RemoteWrite(0, false), Plan(6), RemoteWrite(2, false), Complete(13190896228423499040, false), Feed(1), Plan(2), RemoteWrite(2, false), Plan(7), Complete(3620586888490235240, false), Drain, GrantKeys(2)]

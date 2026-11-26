@@ -10,6 +10,13 @@ impl Copy for big_automata::fingerprint::Fingerprint < T >
 impl Default for big_automata::durable_outbox::held::HeldConfig
 impl Default for big_automata::kit::calls::Aborts < Id >
 impl Default for big_automata::kit::calls::Pool < F >
+impl Default for big_automata::kit::scheduler::Scheduler < Seed >
+impl Default for big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >
+impl Default for big_automata::kit::watermark::CursorSlotState < Key >
+impl Default for big_automata::kit::watermark::JobState < StreamId , Cursor >
+impl Default for big_automata::kit::watermark::StreamState < Key , Cursor >
+impl Default for big_automata::kit::watermark::Waiter < StreamId >
+impl Default for big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >
 impl Default for big_automata::okv::memory::MemoryDb
 impl Default for big_automata::okv::memory::OkvTable < K , V >
 impl Default for big_automata::okv::oracle::Oracle < K , V >
@@ -196,6 +203,46 @@ pub impl big_automata::kit::calls::Pool < F >::async fn next (& mut self) -> F :
 pub impl big_automata::kit::calls::Pool < F >::async fn wait < I , X > (& mut self , inputs : & async_channel :: Receiver < I > , extra : impl Future < Output = X > , now : Instant , due : Option < Instant > ,) -> Event < I , F :: Output , X >
 pub impl big_automata::kit::calls::Pool < F >::fn clear (& mut self)
 pub impl big_automata::kit::calls::Pool < F >::fn extend (& mut self , calls : impl IntoIterator < Item = F >)
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn complete (& mut self , id : TaskId) -> Option < Retry >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn counts (& self) -> SchedulerCounts
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn drain_spawn_queue (& mut self) -> std :: vec :: Drain < '_ , TaskSeed < Seed > >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn drain_stop_queue (& mut self) -> std :: vec :: Drain < '_ , TaskId >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn next_due (& self) -> Option < Instant >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn queue (& mut self , now : Instant , seed : Seed) -> TaskId
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn requeue_spawned (& mut self , tasks : impl IntoIterator < Item = TaskSeed < Seed > >)
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn retry (& mut self , id : TaskId , seed : Seed , min_delay : Duration , now : Instant ,) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn retry_of (& self , id : TaskId) -> Option < Retry >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn set_max_backoff (& mut self , max_backoff : Duration)
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn stop (& mut self , id : TaskId) -> Option < Stopped >
+pub impl big_automata::kit::scheduler::Scheduler < Seed >::fn tick (& mut self , now : Instant)
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn active_task (& self , key : & Key) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn cancel (& mut self , key : & Key) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn complete (& mut self , task : TaskId) -> Option < (Key , Seed) >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn counts (& self) -> SchedulerCounts
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn drain_spawn_queue (& mut self) -> std :: vec :: Drain < '_ , TaskSeed < Seed > >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn drain_stop_queue (& mut self) -> std :: vec :: Drain < '_ , TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn fail (& mut self , task : TaskId , min_delay : Duration , now : Instant) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn is_parked (& self , key : & Key) -> bool
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn key_of (& self , task : TaskId) -> Option < & Key >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn next_due (& self) -> Option < Instant >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn park (& mut self , key : Key , seed : Seed)
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn replace (& mut self , now : Instant , key : Key , seed : Seed) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn replace_with (& mut self , now : Instant , key : Key , seed : Seed , merge : impl FnOnce (Seed , Seed) -> Seed ,) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn retry_of (& self , task : TaskId) -> Option < Retry >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn set_max_backoff (& mut self , max_backoff : Duration)
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn stopped (& mut self , now : Instant , task : TaskId) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn stopping (& self) -> usize
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn stopping_task (& self , key : & Key) -> Option < TaskId >
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn tick (& mut self , now : Instant)
+pub impl big_automata::kit::scheduler::keyed::KeyedScheduler < Key , Seed >::fn wake (& mut self , now : Instant , key : & Key) -> Option < TaskId >
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn add_job (& mut self , key : Key , cursor : Cursor , sids : impl IntoIterator < Item = StreamId > ,) -> Set < StreamId >
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn is_settled (& self , sid : & StreamId) -> bool
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn owes (& self , key : & Key , cursor : & Cursor) -> bool
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn pending_jobs_len (& self) -> usize
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn release_stream (& mut self , key : & Key , sid : & StreamId , before_cursor : & Cursor ,) -> Option < Cursor >
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn retire_stream (& mut self , sid : & StreamId)
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn settle_on_cursor (& mut self , key : & Key , cursor : & Cursor ,) -> Vec < (StreamId , Option < Cursor >) >
+pub impl big_automata::kit::watermark::WatermarkMachine < Key , StreamId , Cursor >::fn watermark (& self , sid : & StreamId) -> Option < Cursor >
 pub impl big_automata::okv::Mutation < K , V >::fn into_row (self) -> (K , Option < V >)
 pub impl big_automata::okv::Selector < K >::fn matches (& self , key : & K) -> bool
 pub impl big_automata::okv::memory::MemoryDb::fn begin (& self) -> MemoryTx
@@ -346,6 +393,9 @@ pub mod big_automata::durable_outbox::held
 pub mod big_automata::fingerprint
 pub mod big_automata::kit
 pub mod big_automata::kit::calls
+pub mod big_automata::kit::scheduler
+pub mod big_automata::kit::scheduler::keyed
+pub mod big_automata::kit::watermark
 pub mod big_automata::long_poll
 pub mod big_automata::okv
 pub mod big_automata::okv::laws
@@ -387,6 +437,9 @@ pub struct big_automata::fingerprint::Fingerprint< T >  {  }
 pub struct big_automata::fingerprint::FingerprintSeed  {  }
 pub struct big_automata::kit::calls::Aborts< Id >  {  }
 pub struct big_automata::kit::calls::Pool< F >  {  }
+pub struct big_automata::kit::scheduler::SchedulerCounts  { live: usize, delayed: usize, spawn_queue: usize, stop_queue: usize }
+pub struct big_automata::kit::scheduler::Stopped  { retry: Retry, running: bool }
+pub struct big_automata::kit::scheduler::keyed::KeyedScheduler< Key , Seed >  {  }
 pub struct big_automata::okv::Pruned  { floor: Rev, tombstones: usize }
 pub struct big_automata::okv::laws::OkvStreams< B >  { 0: B }
 pub struct big_automata::okv::memory::Conflict  { base: Rev, current: Rev }
@@ -450,6 +503,7 @@ pub type big_automata::durable_outbox::Priority = u8
 pub type big_automata::durable_outbox::Version = u64
 pub type big_automata::kit::Clock = std :: sync :: Arc < dyn Fn () -> Instant + Send + Sync >
 pub type big_automata::kit::Instant = web_time :: Instant
+pub type big_automata::kit::scheduler::TaskId = u64
 pub type big_automata::okv::laws::Bytes = Vec < u8 >
 pub type big_automata::part_store::ObjPayload = serde_json :: Value
 pub type big_automata::replay::wire::Generation = u64
