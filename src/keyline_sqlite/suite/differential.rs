@@ -258,7 +258,9 @@ mod deep {
         note("version", format!("{:?}", block_on(store.version()).unwrap()));
         note("digest", format!("{:?}", ask!(store.digest())));
         note("subjects", format!("{:?}", ask!(store.subjects())));
+        let started = std::time::Instant::now();
         for (subject, _) in KEYRING.iter() {
+            eprintln!("DEEP   subject {subject:?} at {:?}", started.elapsed());
             note("members", format!("{subject:?} {:?}", ask!(store.members(*subject))));
             note("closure", format!("{subject:?} {:?}", ask!(store.closure(*subject))));
             note(

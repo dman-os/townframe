@@ -141,6 +141,8 @@ pub async fn load<W: Encode + Decode>(
             .filter(|node| !fetched.contains(node))
             .collect();
     }
+    #[cfg(test)]
+    eprintln!("DEEP     loaded closure certs={} rows={rows_read} nodes={}", certificates.len(), reach.len());
     Ok(evaluated(certificates, rows_read))
 }
 
