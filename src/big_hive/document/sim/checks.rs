@@ -31,6 +31,12 @@ impl Sim {
             "doc {doc}: frontier published at {rev}, ahead of the applied {} (law 5)",
             live.applied_rev
         );
+        // its heads are committed ones: a write in flight has a change nobody may publish
+        let known = self.world.committed_hashes(doc);
+        assert!(
+            live.doc.get_heads().iter().all(|head| known.contains(head)),
+            "doc {doc}: a frontier was published with an uncommitted change in its heads (law 1)"
+        );
     }
 
     /// A reply: a write's change is applied and committed before the caller hears of it (laws
@@ -94,6 +100,7 @@ impl Sim {
                         .collect::<Vec<_>>()
                 );
             }
+            (Waiting::Ingest { .. }, _) => panic!("an ingest is answered by Ingested"),
             (Waiting::Read { .. }, Err(rejected)) => {
                 assert!(matches!(
                     rejected,
@@ -101,6 +108,54 @@ impl Sim {
                 ));
             }
         }
+    }
+
+    /// An ingest's answer: committed and applied before the author hears of it, or nothing left.
+    pub(super) fn ingested(&mut self, ticket: Ticket, result: Result<(), Rejected>) {
+        let Some(Waiting::Ingest { doc, key }) = self.waiting.remove(&ticket) else {
+            panic!("an ingest is answered once");
+        };
+        let committed = self.world.visible(doc).contains(&key);
+        let live = self.live(doc).is_some_and(|live| live.contains(&key));
+        match result {
+            Ok(()) => {
+                assert!(
+                    committed,
+                    "doc {doc}: {key} answered before it was committed (law 1)"
+                );
+                // (an unreadable document's live copy is dropped in the flush that answers)
+                assert!(
+                    live || self.live(doc).is_none(),
+                    "doc {doc}: {key} answered but not applied"
+                );
+                self.acked[doc].insert(key);
+            }
+            // (the key may be the one in an ingest that is still in flight)
+            Err(_) => assert!(
+                !live || committed || !self.in_flight_changes(doc).is_empty(),
+                "doc {doc}: a refused ingest left {key} in the document (law 1)"
+            ),
+        }
+    }
+
+    /// The changes of the write in flight for `doc`: out for encryption or commit, or prepared
+    /// for a plan.
+    pub(super) fn in_flight_changes(&self, doc: usize) -> BTreeSet<ChangeHash> {
+        let mut bytes: Vec<Vec<u8>> = vec![];
+        for flight in self.flights.iter().filter(|flight| flight.doc == doc) {
+            match &flight.ask {
+                Ask::Encrypt(change) => bytes.push(change.clone()),
+                Ask::Commit(plan) => bytes.push(plan.change.ciphertext.clone()),
+                _ => {}
+            }
+        }
+        if let Some(plan) = self.held.get(&doc) {
+            bytes.extend(self.plans[plan].prepared[&doc].change.clone());
+        }
+        bytes
+            .into_iter()
+            .map(|bytes| Change::from_bytes(bytes).expect("a change").hash())
+            .collect()
     }
 
     /// After every step.
@@ -116,13 +171,23 @@ impl Sim {
             let Some(machine) = self.machines[doc].as_ref() else {
                 continue;
             };
+            // the machine's idea of the frontier is the row in the store: both change only when
+            // a publication or a commit lands, in the same step
+            assert_eq!(
+                machine.doc.frontier_rev, revs.0,
+                "doc {doc}: the machine thinks the frontier is at {}, the store has it at {} (law 5)",
+                machine.doc.frontier_rev, revs.0
+            );
             if let Phase::Live(live) = &machine.doc.phase {
-                // law 1: the live document holds only committed changes
+                // law 1: the live document holds only committed changes, besides the one change
+                // of the write in flight, which nobody may look at
                 let committed = self.world.committed_hashes(doc);
+                let in_flight = self.in_flight_changes(doc);
                 for change in live.doc.get_changes(&[]) {
                     assert!(
-                        committed.contains(&change.hash()),
-                        "doc {doc}: the live document holds an uncommitted change (law 1)"
+                        committed.contains(&change.hash()) || in_flight.contains(&change.hash()),
+                        "doc {doc}: the live document holds a change that is neither committed nor \
+                         the write in flight (law 1)"
                     );
                 }
                 assert!(machine.doc.known_rev <= revs.1);
@@ -144,7 +209,9 @@ impl Sim {
                 // law 7: nothing is left in any of the places a machine can hold work
                 let calls = self.flights.iter().any(|flight| flight.doc == doc);
                 let asked = self.waiting.values().any(|waiting| match waiting {
-                    Waiting::Write { doc: d, .. } | Waiting::Read { doc: d, .. } => *d == doc,
+                    Waiting::Write { doc: d, .. }
+                    | Waiting::Read { doc: d, .. }
+                    | Waiting::Ingest { doc: d, .. } => *d == doc,
                 });
                 assert!(
                     machine.handles.is_empty()
@@ -202,7 +269,9 @@ impl Sim {
             }
         }
         for waiting in self.waiting.values() {
-            let (Waiting::Write { doc, .. } | Waiting::Read { doc, .. }) = waiting;
+            let (Waiting::Write { doc, .. }
+            | Waiting::Read { doc, .. }
+            | Waiting::Ingest { doc, .. }) = waiting;
             let parked = self.machines[*doc]
                 .as_ref()
                 .is_some_and(|m| matches!(m.doc.phase, Phase::Parked { .. }));

@@ -52,6 +52,16 @@ impl Sim {
             .is_some_and(|machine| machine.doc.evictable())
     }
 
+    /// How many requests have not been answered.
+    pub(in crate::document) fn unanswered(&self) -> usize {
+        self.waiting.len()
+    }
+
+    /// Prepare a plan of plain writes on the documents of `mask`.
+    pub(in crate::document) fn plan_prepare_writes(&mut self, mask: usize) {
+        self.plan_prepare_kind(mask, Some(false));
+    }
+
     pub(in crate::document) fn deliver_all(&mut self) {
         while !self.mail.is_empty() {
             self.deliver(0);

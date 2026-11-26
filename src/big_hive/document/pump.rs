@@ -153,7 +153,11 @@ impl<O> Document<O> {
         }
         for queued in std::mem::take(&mut self.queue) {
             match queued {
-                Queued::Write { ticket, .. } => self.reply(ticket, Err(Rejected::Unreadable)),
+                Queued::Write { ticket, work } => self.answer(
+                    ticket,
+                    matches!(work, Work::Changes(_)),
+                    Err(Rejected::Unreadable),
+                ),
                 Queued::Plan { plan, .. } => self.pending.push(Command::Prepared {
                     plan,
                     result: Err(Rejected::Unreadable),
@@ -188,15 +192,45 @@ impl<O> Document<O> {
             && !matches!(live.remote, Remote::Applying { .. })
             && !matches!(self.frontier, Frontier::Publishing { .. });
         if idle {
-            self.phase = Phase::Cold;
-            // A frontier that was current for what was applied is stale for the tree.
-            if self.known_rev > self.frontier_rev {
-                self.frontier = Frontier::Stale;
-            }
+            self.go_cold();
         }
     }
 
+    /// A write ended without a commit: forget its change by throwing the live document away, and
+    /// tell the listeners again once the new one is there.
+    pub(super) fn forget_write(&mut self) {
+        self.renotify = true;
+        self.go_cold();
+    }
+
+    /// Throw the live document away. It is hydrated again when somebody wants it, from
+    /// committed state; this is how a failed write forgets its change.
+    pub(super) fn go_cold(&mut self) {
+        // a remote read in flight answers a document that is gone
+        if let Phase::Live(live) = &mut self.phase
+            && let Remote::Applying { call } = live.remote
+        {
+            self.stopping.insert(call);
+            self.pending.push(Command::Cancel { call });
+        }
+        self.phase = Phase::Cold;
+        // A frontier that was current for what was applied is stale for the tree. (One being
+        // published stays: its call is still out, and its outcome settles it.)
+        if self.known_rev > self.frontier_rev && matches!(self.frontier, Frontier::Current) {
+            self.frontier = Frontier::Stale;
+        }
+    }
+
+    /// Serve the waiting reads, unless a write is in flight: the live document then holds a
+    /// change that is not committed, and no reader may see it (law 1).
     fn serve_reads(&mut self) {
+        #[cfg(test)]
+        let held = self.plant != Some(Plant::ServeReadsDuringWrite);
+        #[cfg(not(test))]
+        let held = true;
+        if held && !matches!(self.writes, Writes::Idle) {
+            return;
+        }
         let Phase::Live(live) = &self.phase else {
             unreachable!("reads are served from a live document");
         };
@@ -216,8 +250,13 @@ impl<O> Document<O> {
         true
     }
 
-    /// Start the next piece of work on a live document, if the pipeline is free. Answers
-    /// whether it finished at once, so the next piece may start in the same flush.
+    /// Start what can start on a live document. Remote materialization runs alongside a write.
+    /// A write starts when none is in flight and no publication is out; the frontier is
+    /// published only when no write is in flight and none is queued, since its heads would
+    /// otherwise include an uncommitted change. The two never overlap, so the rows of the
+    /// frontier are ordered by the machine itself and not by any driver: a plan's commit is
+    /// run by the Write coordinator, not by this document's driver.
+    /// Answers whether a write finished at once, so the next may start in the same flush.
     fn step_pipeline(&mut self) -> bool {
         let Phase::Live(live) = &self.phase else {
             unreachable!("the pipeline runs on a live document");
@@ -231,34 +270,31 @@ impl<O> Document<O> {
         let applying = matches!(live.remote, Remote::Applying { .. });
         let behind = matches!(live.remote, Remote::Behind);
         let up_to_date = matches!(live.remote, Remote::UpToDate);
-        if writing || publishing || applying {
-            return false;
-        }
+        let stale = matches!(self.frontier, Frontier::Stale);
         #[cfg(test)]
-        if self.plant == Some(Plant::FrontierAhead)
-            && behind
-            && matches!(self.frontier, Frontier::Stale)
-        {
+        let publish_while_writing = self.plant == Some(Plant::PublishDuringWrite);
+        #[cfg(not(test))]
+        let publish_while_writing = false;
+        #[cfg(test)]
+        if self.plant == Some(Plant::FrontierAhead) && behind && stale && !publishing && !writing {
             self.start_publish();
             return false;
         }
-        let remote_due = behind && !self.backing_off();
-        let write_due = !self.queue.is_empty();
-        if remote_due && (!write_due || !self.last_ran_remote) {
-            self.last_ran_remote = true;
+        if behind && !applying && self.readable && !self.backing_off() {
             self.start_decrypt();
-            false
-        } else if write_due {
-            self.last_ran_remote = false;
-            self.start_write()
-        } else {
-            let publishable =
-                up_to_date && matches!(self.frontier, Frontier::Stale) && !self.backing_off();
-            if publishable {
-                self.start_publish();
-            }
-            false
         }
+        #[cfg(test)]
+        let write_while_publishing = self.plant == Some(Plant::WriteWhilePublishing);
+        #[cfg(not(test))]
+        let write_while_publishing = false;
+        if !writing && (!publishing || write_while_publishing) && !self.queue.is_empty() {
+            return self.start_write();
+        }
+        let idle = (!writing && self.queue.is_empty()) || publish_while_writing;
+        if idle && up_to_date && stale && !publishing && !self.backing_off() {
+            self.start_publish();
+        }
+        false
     }
 
     fn start_decrypt(&mut self) {
@@ -287,17 +323,17 @@ impl<O> Document<O> {
         } else {
             rev
         };
+        let heads = live.doc.get_heads();
         self.pending.push(Command::PublishFrontier {
             call,
-            heads: live.doc.get_heads(),
+            heads: heads.clone(),
             rev,
         });
-        self.frontier = Frontier::Publishing { call, rev };
+        self.frontier = Frontier::Publishing { call, rev, heads };
     }
 
-    /// Build the front of the queue against the live document and start its commit (or answer
-    /// the plan). Answers `true` if the pipeline is free again: the closure failed or changed
-    /// nothing.
+    /// Make the front of the queue on the live document and start its commit (or answer the
+    /// plan). Answers `true` if the pipeline is free again: the write failed or changed nothing.
     fn start_write(&mut self) -> bool {
         #[cfg(test)]
         let next = if self.plant == Some(Plant::LifoQueue) {
@@ -308,40 +344,36 @@ impl<O> Document<O> {
         #[cfg(not(test))]
         let next = self.queue.pop_front();
         match next.expect("a write is due") {
-            Queued::Write { ticket, op } => match self.build(op) {
-                Err(error) => {
-                    self.reply(ticket, Err(error));
-                    true
+            Queued::Write { ticket, work } => {
+                let ingest = matches!(work, Work::Changes(_));
+                match self.build(work) {
+                    Err(error) => {
+                        self.answer(ticket, ingest, Err(error));
+                        true
+                    }
+                    Ok(Drafted {
+                        bytes: None, out, ..
+                    }) => {
+                        self.answer(ticket, ingest, Ok(out));
+                        true
+                    }
+                    Ok(Drafted {
+                        bytes: Some(change),
+                        frontier,
+                        out,
+                    }) => {
+                        let call = self.fresh_call();
+                        self.pending.push(Command::PrepareEncrypt { call, change });
+                        self.writes = Writes::Encrypting {
+                            call,
+                            ticket,
+                            built: Built { frontier, out },
+                        };
+                        false
+                    }
                 }
-                Ok(Drafted {
-                    change: None, out, ..
-                }) => {
-                    self.reply(ticket, Ok(out));
-                    true
-                }
-                Ok(Drafted {
-                    change: Some(change),
-                    frontier,
-                    out,
-                }) => {
-                    let call = self.fresh_call();
-                    self.pending.push(Command::PrepareEncrypt {
-                        call,
-                        change: change.raw_bytes().to_vec(),
-                    });
-                    self.writes = Writes::Encrypting {
-                        call,
-                        ticket,
-                        built: Built {
-                            change,
-                            frontier,
-                            out,
-                        },
-                    };
-                    false
-                }
-            },
-            Queued::Plan { plan, op } => match self.build(op) {
+            }
+            Queued::Plan { plan, work } => match self.build(work) {
                 Err(error) => {
                     self.pending.push(Command::Prepared {
                         plan,
@@ -350,57 +382,81 @@ impl<O> Document<O> {
                     true
                 }
                 Ok(Drafted {
-                    change,
+                    bytes,
                     frontier,
                     out,
                 }) => {
                     self.pending.push(Command::Prepared {
                         plan,
                         result: Ok(PlanPrepared {
-                            change: change.as_ref().map(|change| change.raw_bytes().to_vec()),
+                            change: bytes,
                             frontier: frontier.clone(),
                             out,
                         }),
                     });
-                    self.writes = Writes::HeldForPlan {
-                        plan,
-                        change,
-                        frontier,
-                    };
+                    self.writes = Writes::HeldForPlan { plan, frontier };
                     false
                 }
             },
         }
     }
 
-    /// Run the caller's closure on a scratch copy of the live document and take the change it
-    /// made. The live document is not touched (persist, then apply).
-    fn build(&self, op: WriteOp<O>) -> Result<Drafted<O>, Rejected> {
-        let Phase::Live(live) = &self.phase else {
-            unreachable!("a write is built on a live document");
+    /// Make the work on the live document: run the closure in a transaction and commit it, or
+    /// apply the author's changes, and take the bytes of what changed. The change is in the live
+    /// document from here until the write ends, which is why nothing may look at it.
+    fn build(&mut self, work: Work<O>) -> Result<Drafted<O>, Rejected> {
+        let Phase::Live(live) = &mut self.phase else {
+            unreachable!("a write is made on a live document");
         };
-        let mut scratch = live.doc.clone();
-        let mut tx = scratch.transaction();
-        // a failed closure leaves `tx` to roll itself back, and the scratch is dropped
-        let out = op(&mut tx).map_err(|error| Rejected::Op(error.to_string()))?;
-        let (hash, _) = tx.commit();
-        if hash.is_none() {
-            return Ok(Drafted {
-                change: None,
-                frontier: None,
-                out,
-            });
-        }
-        let change = scratch
-            .get_last_local_change()
-            .expect("the change just made");
+        let (bytes, out) = match work {
+            Work::Op(op) => {
+                let mut tx = live.doc.transaction();
+                // a failed closure leaves `tx` to roll itself back
+                let out = op(&mut tx).map_err(|error| Rejected::Op(error.to_string()))?;
+                let (hash, _) = tx.commit();
+                if hash.is_none() {
+                    return Ok(Drafted {
+                        bytes: None,
+                        frontier: None,
+                        out: Some(out),
+                    });
+                }
+                let change = live
+                    .doc
+                    .get_last_local_change()
+                    .expect("the change just made");
+                (change.raw_bytes().to_vec(), Some(out))
+            }
+            Work::Changes(changes) => {
+                let new: Vec<Change> = changes
+                    .into_iter()
+                    .filter(|change| live.doc.get_change_meta_by_hash(&change.hash()).is_none())
+                    .collect();
+                if new.is_empty() {
+                    return Ok(Drafted {
+                        bytes: None,
+                        frontier: None,
+                        out: None,
+                    });
+                }
+                let bytes = new
+                    .iter()
+                    .flat_map(|change| change.raw_bytes())
+                    .copied()
+                    .collect();
+                live.doc
+                    .apply_changes(new)
+                    .expect("an author's changes apply");
+                (bytes, None)
+            }
+        };
         // A document that is behind or blocked has heads that are not the heads at a revision.
         let frontier = matches!(live.remote, Remote::UpToDate).then(|| FrontierRow {
-            heads: scratch.get_heads(),
+            heads: live.doc.get_heads(),
             if_prior_rev: live.applied_rev,
         });
         Ok(Drafted {
-            change: Some(change),
+            bytes: Some(bytes),
             frontier,
             out,
         })

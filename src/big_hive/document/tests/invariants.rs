@@ -38,12 +38,9 @@ impl<O> Document<O> {
             Phase::Parked { missing } => assert!(!missing.is_empty()),
             Phase::Cold => {}
         }
-        if let Frontier::Publishing { call, rev } = &self.frontier {
+        if let Frontier::Publishing { call, rev, .. } = &self.frontier {
+            // (a failed write may have thrown the live document away since)
             calls.push(*call);
-            assert!(
-                matches!(self.phase, Phase::Live(_)),
-                "publishing needs a live document"
-            );
             assert!(self.plant.is_some() || *rev <= self.known_rev);
         }
         match &self.writes {
@@ -62,13 +59,16 @@ impl<O> Document<O> {
         );
         // after a flush nothing that could start is left waiting
         if self.plant.is_none() {
-            if let Phase::Live(live) = &self.phase {
-                assert!(self.reads.is_empty(), "a live document serves its reads");
-                let free = matches!(self.writes, Writes::Idle)
-                    && !matches!(live.remote, Remote::Applying { .. })
-                    && !matches!(self.frontier, Frontier::Publishing { .. });
-                if free && self.readable {
-                    assert!(self.queue.is_empty(), "a free pipeline starts its queue");
+            if matches!(self.phase, Phase::Live(_)) {
+                assert!(
+                    self.reads.is_empty() || !matches!(self.writes, Writes::Idle),
+                    "a live document with no write in flight serves its reads"
+                );
+                if matches!(self.writes, Writes::Idle)
+                    && self.readable
+                    && !matches!(self.frontier, Frontier::Publishing { .. })
+                {
+                    assert!(self.queue.is_empty(), "no write in flight starts the queue");
                 }
             }
             if matches!(self.phase, Phase::Cold) {

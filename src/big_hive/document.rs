@@ -18,21 +18,33 @@
 //! documents have a machine is the Hub's business; so is the idle deadline's consequence: the
 //! machine only *reports* that it may be evicted ([`Command::Evictable`]), and the Hub stops it.
 //!
-//! # The one idea: persist, then apply
+//! # The one idea: nothing is visible before it is committed
 //!
-//! Memory only ever holds committed state. A write runs the caller's closure against a scratch
-//! copy of the live document, takes the bytes of the change it made, and throws the scratch
-//! away; the live document is untouched. The change is encrypted by the Keyhive boundary
-//! (which also does not change memory), committed to SQLite together with its other rows, and
-//! only when the commit reports success is the change applied to the live document and the
-//! caller answered. A failed or aborted write therefore leaves nothing behind, in memory or on
-//! disk, and a crash loses nothing that was ever visible.
+//! Memory only ever holds committed state *as far as any reader can tell*. A write runs the
+//! caller's closure in a transaction on the live document, commits that transaction and takes
+//! the bytes of the change it made. From then until the write ends, the live document holds a
+//! change that is not yet committed to SQLite, so the machine lets nobody look: reads wait,
+//! remote content is not applied, the frontier is not published and the change feed is not
+//! notified. The change is encrypted by the Keyhive boundary (which does not change memory),
+//! committed to SQLite together with its other rows, and only when the commit reports success
+//! does the write end: the document is released, held reads are served and the caller is
+//! answered. If the write fails or is aborted instead, the machine throws the live document
+//! away and hydrates a new one from committed state, then serves the held reads and later
+//! writes from that. A reader therefore never observes a change before `committed`, a failed
+//! write leaves nothing behind in memory or on disk, and a crash loses nothing that was ever
+//! visible. The price of the design is that a failed write costs a hydration; failures are
+//! rare, and a write never copies the document.
 //!
-//! automerge 0.12 offers no way to take the bytes of a pending transaction before committing it,
-//! so the scratch is a clone of the document (`Automerge::clone` keeps the actor, so the change
-//! continues the machine's own sequence). That copies the document once per write: cheap for
-//! small documents, a cost to watch for large ones. If it ever matters, the right fix is an
-//! upstream "export the pending change" on `Transaction`, not a change here.
+//! Changes made by somebody else are written the same way. [`Document::ingest`] takes
+//! automerge changes that an external author built on a document of their own and sends as
+//! bytes. They are applied to the live document, persisted and released exactly like a local
+//! write, with no caller closure: the same pipeline, the same exclusions, the same laws. The
+//! multi-document shape builds on this. A caller that locks several documents and mutates
+//! their live docs does so with a `BigDocHandle`-level lock on its own side; that lock is not
+//! in this machine, which sees one write on one document at a time. The back end, which takes
+//! `(document, change bytes)` for N documents from local handles or external authors, is a
+//! [`Document::prepare`] or [`Document::ingest`] on each document and one commit by the Write
+//! coordinator.
 //!
 //! # The state machines
 //!
@@ -54,7 +66,8 @@
 //! **Writes** (`Writes`): the commit pipeline, at most one write at a time, which is what gives
 //! per-document order without any further mechanism. Later writes wait in a FIFO queue.
 //! - `Idle`.
-//! - `Encrypting { call }`: the change is built and out for encryption.
+//! - `Encrypting { call }`: the change is made (it is in the live document, which nobody may
+//!   look at) and out for encryption.
 //! - `Committing { call }`: the encrypted change and its frontier row are out as a
 //!   [`Command::Commit`].
 //! - `HeldForPlan { plan }`: the document was prepared for a multi-document plan (see below)
@@ -72,17 +85,31 @@
 //!
 //! **Frontier publication** (`Frontier`): the published `(heads, rev)` of the document is a row
 //! downstream consumers follow. It is `Current` when it reflects the live heads at
-//! `applied_rev`, `Stale` when it does not, and `Publishing { call }` while a
+//! `applied_rev`, `Stale` when it does not, and `Publishing { call, rev, heads }` while a
 //! [`Command::PublishFrontier`] is out. A local write publishes its frontier in its own commit
 //! rather than in a second transaction. A document that is blocked is never published: a frontier
 //! for half a document would stop the Hub from finding it stale once the keys arrive.
 //!
-//! These four are not independent. Remote materialization and publication are excluded
-//! while a write is anywhere in the pipeline, and each other, so every change to the live
-//! document, and every write of the frontier row, is totally ordered per document. That is why
-//! a local commit knows the heads its frontier row must carry, and why the frontier a
-//! document publishes is never a mix of two moments. When both a write and remote work are
-//! due, they alternate, so a stream of one cannot starve the other.
+//! These four are not fully independent. While a write is anywhere in the pipeline the live
+//! document holds a change that is not committed, so three things wait for it: reads, the
+//! publication of the frontier (its heads would include the change) and the notification of
+//! listeners (likewise). Remote materialization does not wait. automerge is a CRDT: remote
+//! changes may be applied to the live document while a local write is in flight, in either
+//! order, with the same result. If the write then fails, the machine hydrates again from
+//! committed state, which keeps every durable remote change and drops the local one. A write
+//! The frontier's rows are written one at a time: a write does not start while a publication
+//! is out, and the frontier is not published while a write is in flight. That ordering is the
+//! machine's own. It cannot be left to the document's driver, because the commit of a
+//! multi-document plan is run by the Write coordinator, outside it: a publication still in
+//! flight could land after the plan's row and take the frontier back (the simulation shows this,
+//! `planted_write_while_publishing_is_caught`).
+//!
+//! The frontier row of a local write is the one place a compare-and-set stays. The row
+//! carries `if_prior_rev`, the revision the tree was at when the change was made, and the store
+//! writes the row only if the tree is still there. Ordering alone would keep the rows in order,
+//! but not truthful: remote content that landed in the tree and has not been applied here is
+//! missing from the row's heads, yet the row would claim a revision that contains it. The
+//! simulation shows this (`without_the_compare_and_set_a_frontier_row_claims_unapplied_content`).
 //!
 //! # Inputs
 //!
@@ -119,7 +146,7 @@
 //! # Multi-document plans
 //!
 //! The Write coordinator sends [`Document::prepare`] to each document of a plan. The machine
-//! builds the change against a scratch copy, as for a write, and answers
+//! makes the change on the live document, as for a write, and answers
 //! [`Command::Prepared`] with the change bytes and the frontier row the plan must carry. It
 //! then holds the document until [`Document::apply`] (the plan committed: apply the change)
 //! or [`Document::abort`] (it did not). A single-document write is the same protocol run by
@@ -133,13 +160,14 @@
 //!
 //! # Laws
 //!
-//! 1. **Live equals committed.** The live document contains exactly the committed changes it
-//!    has applied. Nothing is applied before `Committed`, and a failed or aborted write leaves
-//!    it unchanged. (A reader of the live document could otherwise see state a crash erases.)
+//! 1. **Readers see only committed state.** No read is served, and no notification is sent,
+//!    while the live document holds a change that is not committed. A failed or aborted write
+//!    leaves nothing: the live document is rebuilt from committed state before anybody looks
+//!    again. (A reader could otherwise see state a crash erases.)
 //! 2. **Per-document order.** Writes apply in submission order, and each is built on a state
 //!    that includes every earlier write. (One in flight at a time, FIFO.)
 //! 3. **Read your writes.** A handle whose write returned sees that write: the reply is sent
-//!    after the change is applied.
+//!    once the change is committed, and reads wait for the write that is in flight.
 //! 4. **Plans hold the document.** While prepared for a plan, no other write is prepared or
 //!    committed on the document; on `apply` or `abort` the held writes resume in order.
 //!    (Otherwise a plan's commit could be built on a state the plan's other documents never
@@ -152,7 +180,7 @@
 //!    `Parked` on `epoch_moved` by trying again.
 //! 7. **Eviction.** [`Document::evictable`] holds only with no handles, no interest, nothing in
 //!    flight and nothing held, and no catch-up work left. Evicting loses nothing, because
-//!    everything live is committed.
+//!    everything live is committed (no write is in flight to leave an uncommitted change).
 //! 8. **Unreadable documents are never hydrated.** No `Hydrate` or `Decrypt` is issued while
 //!    the machine has been told the document is unreadable.
 //!
@@ -224,8 +252,8 @@ pub type Ticket = u64;
 /// A multi-document plan, named by the Write coordinator.
 pub type PlanId = u64;
 
-/// A write's closure: builds a change against a transaction on a scratch copy of the document.
-/// Its output is delivered once the change is applied.
+/// A write's closure: builds a change in a transaction on the live document. Its output is
+/// delivered once the change is committed.
 pub type WriteOp<O> = Box<dyn FnOnce(&mut Transaction<'_>) -> Result<O, AutomergeError> + Send>;
 
 /// A read's closure over the live document, which only ever holds committed state.
@@ -333,10 +361,11 @@ pub struct Plan {
 /// What the Write coordinator gets back from [`Document::prepare`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanPrepared<O> {
-    /// The change's bytes, or `None` if the closure changed nothing.
+    /// The change's bytes, or `None` if nothing changed.
     pub change: Option<Vec<u8>>,
     pub frontier: Option<FrontierRow>,
-    pub out: O,
+    /// The closure's output; `None` for an ingest.
+    pub out: Option<O>,
 }
 
 /// Why a request was refused. Nothing was changed.
@@ -367,7 +396,8 @@ pub enum Command<O> {
         call: CallId,
     },
     /// Read the changes the document lacks, given its `heads`, at a tree revision of at least
-    /// `rev`.
+    /// `rev`. The heads may name the change of a write in flight, which is not committed: the
+    /// driver answers with what it can prove the document lacks.
     Decrypt {
         call: CallId,
         heads: Vec<ChangeHash>,
@@ -393,6 +423,11 @@ pub enum Command<O> {
     Reply {
         ticket: Ticket,
         result: Result<O, Rejected>,
+    },
+    /// The answer to [`Document::ingest`]: the changes are committed and applied, or were not.
+    Ingested {
+        ticket: Ticket,
+        result: Result<(), Rejected>,
     },
     /// The live document's heads moved.
     Notify {
@@ -435,23 +470,33 @@ enum Remote {
 enum Frontier {
     Current,
     Stale,
-    Publishing { call: CallId, rev: Rev },
+    Publishing {
+        call: CallId,
+        rev: Rev,
+        heads: Vec<ChangeHash>,
+    },
 }
 
-/// A change built against the live document, waiting for its commit.
+/// What a write is: a caller's closure, or changes an external author built.
+enum Work<O> {
+    Op(WriteOp<O>),
+    Changes(Vec<Change>),
+}
+
+/// A change made on the live document, waiting for its commit.
 struct Built<O> {
-    change: Change,
     /// The frontier row the commit carries, if the document was in a state to publish.
     frontier: Option<FrontierRow>,
-    out: O,
+    /// The closure's output; `None` for an ingest, which has no closure.
+    out: Option<O>,
 }
 
-/// What a write's closure made against the scratch copy.
+/// What a write did to the live document.
 struct Drafted<O> {
-    /// `None` if the closure changed nothing.
-    change: Option<Change>,
+    /// The bytes of the change to commit; `None` if nothing changed.
+    bytes: Option<Vec<u8>>,
     frontier: Option<FrontierRow>,
-    out: O,
+    out: Option<O>,
 }
 
 enum Writes<O> {
@@ -467,17 +512,16 @@ enum Writes<O> {
         token: u64,
         built: Built<O>,
     },
-    /// Prepared for `plan`; `change` is `None` if the closure changed nothing.
+    /// Prepared for `plan`. The change is already in the live document.
     HeldForPlan {
         plan: PlanId,
-        change: Option<Change>,
         frontier: Option<FrontierRow>,
     },
 }
 
 enum Queued<O> {
-    Write { ticket: Ticket, op: WriteOp<O> },
-    Plan { plan: PlanId, op: WriteOp<O> },
+    Write { ticket: Ticket, work: Work<O> },
+    Plan { plan: PlanId, work: Work<O> },
 }
 
 /// The idle deadline: armed while the machine is evictable.
@@ -500,8 +544,8 @@ struct Retry {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Plant {
-    /// The change is applied to the live document before its commit (law 1).
-    ApplyBeforeCommit,
+    /// Reads are served while a write is in flight, and see its uncommitted change (law 1).
+    ServeReadsDuringWrite,
     /// The queue is served last in, first out (law 2).
     LifoQueue,
     /// The frontier is published at the newest known revision (law 5).
@@ -513,6 +557,19 @@ pub(crate) enum Plant {
     /// A local commit is taken to have applied everything below its revision, without the
     /// check against the revision the tree had before it (laws 1 and 5).
     TrustLandedRev,
+    /// The frontier is published while a write is in flight, so its heads include a change that
+    /// is not committed (law 1).
+    PublishDuringWrite,
+    /// A remote change applied during a write notifies listeners of heads that include the
+    /// write's uncommitted change (law 1).
+    NotifyDuringWrite,
+    /// A commit's frontier row is taken to be written when the tree is at the machine's current
+    /// applied revision, not at the revision the row expected: remote content applied during
+    /// the write makes the two differ (law 5).
+    FrontierByCurrentRev,
+    /// A write starts while the frontier is being published, so a plan's commit can land before
+    /// the publication and the row goes back (law 5).
+    WriteWhilePublishing,
 }
 
 /// The machine. `O` is what a read or a write closure returns to its caller.
@@ -540,8 +597,9 @@ pub struct Document<O> {
     /// Commands decided by an input, ahead of the next flush's.
     pending: Vec<Command<O>>,
     retry: Retry,
-    /// The last turn of a contended pipeline went to remote work (writes get the next one).
-    last_ran_remote: bool,
+    /// A failed write threw away the live document, and remote changes applied since the last
+    /// notification may have gone with it: the next hydration notifies.
+    renotify: bool,
     #[cfg(test)]
     plant: Option<Plant>,
 }
@@ -576,7 +634,7 @@ impl<O> Document<O> {
             stopping: BTreeSet::new(),
             pending: Vec::new(),
             retry: Retry::default(),
-            last_ran_remote: false,
+            renotify: false,
             #[cfg(test)]
             plant: None,
         }

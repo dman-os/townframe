@@ -47,11 +47,26 @@ impl<O> Document<O> {
         if !self.is_open(handle) {
             self.reply(ticket, Err(Rejected::StaleHandle));
         } else {
-            self.queue.push_back(Queued::Write { ticket, op });
+            self.queue.push_back(Queued::Write {
+                ticket,
+                work: Work::Op(op),
+            });
         }
     }
 
-    /// Queue a read. It is served as soon as the document is live, from committed state.
+    /// Queue changes an external author built on a document of their own, as automerge changes.
+    /// They are applied, persisted and released like a write, and the answer is
+    /// [`Command::Ingested`]. Changes the document already holds are a no-op. Needs no handle:
+    /// the author is not one of ours.
+    pub fn ingest(&mut self, ticket: Ticket, changes: Vec<Change>) {
+        self.queue.push_back(Queued::Write {
+            ticket,
+            work: Work::Changes(changes),
+        });
+    }
+
+    /// Queue a read. It is served as soon as the document is live and no write is in flight,
+    /// from committed state.
     pub fn read(&mut self, ticket: Ticket, handle: Handle, op: ReadOp<O>) {
         if !self.is_open(handle) {
             self.reply(ticket, Err(Rejected::StaleHandle));
@@ -62,6 +77,25 @@ impl<O> Document<O> {
 
     pub(super) fn reply(&mut self, ticket: Ticket, result: Result<O, Rejected>) {
         self.pending.push(Command::Reply { ticket, result });
+    }
+
+    /// Answer a write: a closure's output is a [`Command::Reply`], an ingest's a
+    /// [`Command::Ingested`].
+    pub(super) fn answer(
+        &mut self,
+        ticket: Ticket,
+        ingest: bool,
+        result: Result<Option<O>, Rejected>,
+    ) {
+        match (ingest, result) {
+            (false, Ok(Some(out))) => self.reply(ticket, Ok(out)),
+            (false, Err(error)) => self.reply(ticket, Err(error)),
+            (true, result) => self.pending.push(Command::Ingested {
+                ticket,
+                result: result.map(|_| ()),
+            }),
+            (false, Ok(None)) => unreachable!("a closure's write has an output"),
+        }
     }
 
     // ── the Hub ─────────────────────────────────────────────────────────────────────────────
@@ -135,29 +169,41 @@ impl<O> Document<O> {
     /// when it reaches the front of the queue and the document is idle, and then the document is
     /// held for the plan.
     pub fn prepare(&mut self, plan: PlanId, op: WriteOp<O>) {
-        self.queue.push_back(Queued::Plan { plan, op });
+        self.queue.push_back(Queued::Plan {
+            plan,
+            work: Work::Op(op),
+        });
     }
 
-    /// The plan committed: apply its change and release the document.
+    /// As [`Document::prepare`], for changes an external author built.
+    pub fn prepare_ingest(&mut self, plan: PlanId, changes: Vec<Change>) {
+        self.queue.push_back(Queued::Plan {
+            plan,
+            work: Work::Changes(changes),
+        });
+    }
+
+    /// The plan committed: its change, already in the live document, is now committed, and the
+    /// document is released.
     pub fn apply(&mut self, plan: PlanId, landed: Landed) {
         let Writes::HeldForPlan {
             plan: held,
-            change,
             frontier,
         } = std::mem::replace(&mut self.writes, Writes::Idle)
         else {
             panic!("apply for plan {plan}, which holds no document");
         };
         assert_eq!(held, plan, "apply names the plan that holds the document");
-        self.land(change, frontier.is_some(), landed);
+        self.land(frontier.map(|row| row.if_prior_rev), landed);
     }
 
-    /// The plan did not commit: release the document, applying nothing. A plan still waiting
-    /// in the queue is forgotten.
+    /// The plan did not commit: its change is thrown away with the live document, which is
+    /// hydrated again from committed state. A plan still waiting in the queue is forgotten.
     pub fn abort(&mut self, plan: PlanId) {
         match &self.writes {
             Writes::HeldForPlan { plan: held, .. } if *held == plan => {
                 self.writes = Writes::Idle;
+                self.forget_write();
             }
             _ => self
                 .queue
@@ -187,17 +233,26 @@ impl<O> Document<O> {
                 doc.apply_changes(found.changes)
                     .expect("committed changes apply");
                 self.known_rev = self.known_rev.max(found.rev);
-                self.frontier = if self.frontier_rev >= found.rev {
-                    Frontier::Current
-                } else {
-                    Frontier::Stale
-                };
+                // (a publication still out settles itself when it reports)
+                if !matches!(self.frontier, Frontier::Publishing { .. }) {
+                    self.frontier = if self.frontier_rev >= found.rev {
+                        Frontier::Current
+                    } else {
+                        Frontier::Stale
+                    };
+                }
                 let mut live = Live {
                     doc,
                     applied_rev: found.rev,
                     remote: Remote::UpToDate,
                 };
                 settle(&mut live, self.known_rev);
+                if std::mem::take(&mut self.renotify) {
+                    self.pending.push(Command::Notify {
+                        origin: Origin::Remote,
+                        heads: live.doc.get_heads(),
+                    });
+                }
                 self.phase = Phase::Live(Box::new(live));
             }
             Outcome::Failed => {
@@ -241,10 +296,19 @@ impl<O> Document<O> {
                     Remote::UpToDate
                 };
                 let heads = live.doc.get_heads();
-                if heads != before || live.applied_rev > self.frontier_rev {
+                if matches!(self.frontier, Frontier::Current)
+                    && (heads != before || live.applied_rev > self.frontier_rev)
+                {
                     self.frontier = Frontier::Stale;
                 }
-                if heads != before {
+                // While a write is in flight the heads include its uncommitted change, so
+                // nobody is told; the write's end (or the hydration after its failure) tells.
+                #[cfg(test)]
+                let quiet = !matches!(self.writes, Writes::Idle)
+                    && self.plant != Some(Plant::NotifyDuringWrite);
+                #[cfg(not(test))]
+                let quiet = !matches!(self.writes, Writes::Idle);
+                if heads != before && !quiet {
                     self.pending.push(Command::Notify {
                         origin: Origin::Remote,
                         heads,
@@ -269,18 +333,10 @@ impl<O> Document<O> {
             unreachable!("matched above");
         };
         let Outcome::Done(enc) = outcome else {
-            self.reply(ticket, Err(Rejected::Failed));
+            self.forget_write();
+            self.answer(ticket, built.out.is_none(), Err(Rejected::Failed));
             return;
         };
-        #[cfg(test)]
-        if self.plant == Some(Plant::ApplyBeforeCommit) {
-            let Phase::Live(live) = &mut self.phase else {
-                unreachable!("a write is in flight on a live document");
-            };
-            live.doc
-                .apply_changes([built.change.clone()])
-                .expect("a change built on this document applies");
-        }
         let call = self.fresh_call();
         self.pending.push(Command::Commit {
             call,
@@ -316,32 +372,50 @@ impl<O> Document<O> {
                     token,
                     applied: true,
                 });
-                self.land(Some(built.change), built.frontier.is_some(), landed);
-                // the change is applied before the caller hears of it (law 3)
-                self.reply(ticket, Ok(built.out));
+                self.land(built.frontier.as_ref().map(|row| row.if_prior_rev), landed);
+                // the change is committed before the caller hears of it (law 3)
+                let ingest = built.out.is_none();
+                self.answer(ticket, ingest, Ok(built.out));
             }
             Outcome::Failed | Outcome::Cancelled => {
                 self.pending.push(Command::SettleEncrypt {
                     token,
                     applied: false,
                 });
-                self.reply(ticket, Err(Rejected::Failed));
+                self.forget_write();
+                self.answer(ticket, built.out.is_none(), Err(Rejected::Failed));
             }
         }
     }
 
     pub fn published(&mut self, call: CallId, outcome: Outcome<()>) {
-        let Frontier::Publishing { call: c, rev } = self.frontier else {
+        let Frontier::Publishing {
+            call: c,
+            rev,
+            heads,
+        } = &self.frontier
+        else {
             return;
         };
-        if c != call {
+        if *c != call {
             return;
         }
+        let (rev, heads) = (*rev, heads.clone());
         match outcome {
             Outcome::Done(()) => {
                 self.retry.failures = 0;
                 self.frontier_rev = rev;
-                self.frontier = Frontier::Current;
+                // What was published is current only if the document is still exactly that: a
+                // write may have started, or remote content been applied, since it was issued.
+                let unchanged = matches!(
+                    &self.phase,
+                    Phase::Live(live) if live.applied_rev == rev && live.doc.get_heads() == heads
+                );
+                self.frontier = if unchanged {
+                    Frontier::Current
+                } else {
+                    Frontier::Stale
+                };
             }
             Outcome::Failed => {
                 self.frontier = Frontier::Stale;
@@ -353,19 +427,22 @@ impl<O> Document<O> {
 
     // ── shared transitions ──────────────────────────────────────────────────────────────────
 
-    /// A committed change takes effect: it is applied to the live document, and the tree
-    /// revision and the frontier follow as far as the commit proves them.
-    fn land(&mut self, change: Option<Change>, with_frontier: bool, landed: Landed) {
+    /// The change in the live document is now committed. `row` is the `if_prior_rev` of the
+    /// frontier row the commit carried, if it carried one: the store wrote it exactly if the
+    /// tree was at that revision before the batch.
+    fn land(&mut self, row: Option<Rev>, landed: Landed) {
         let Phase::Live(live) = &mut self.phase else {
             unreachable!("a write holds a live document");
         };
-        if let Some(change) = change {
-            live.doc
-                .apply_changes([change])
-                .expect("a change built on this document applies");
-        }
-        // Nothing else touched the document since the change was built, so the tree held
-        // nothing unapplied exactly when it was at the revision applied.
+        let wrote = row == Some(landed.prior_rev);
+        #[cfg(test)]
+        let wrote = if self.plant == Some(Plant::FrontierByCurrentRev) {
+            row.is_some() && landed.prior_rev == live.applied_rev
+        } else {
+            wrote
+        };
+        // The tree held nothing this machine had not applied exactly when it was at the
+        // revision applied (remote content may have been applied since the change was made).
         #[cfg(test)]
         let trust = self.plant == Some(Plant::TrustLandedRev);
         #[cfg(not(test))]
@@ -373,13 +450,17 @@ impl<O> Document<O> {
         let gap_free = trust || landed.prior_rev == live.applied_rev;
         self.known_rev = self.known_rev.max(landed.rev);
         if gap_free {
-            live.applied_rev = landed.rev;
+            live.applied_rev = live.applied_rev.max(landed.rev);
         }
         settle(live, self.known_rev);
-        if gap_free && with_frontier {
+        if wrote {
             self.frontier_rev = landed.rev;
-            self.frontier = Frontier::Current;
-        } else {
+            self.frontier = if live.applied_rev == landed.rev {
+                Frontier::Current
+            } else {
+                Frontier::Stale
+            };
+        } else if matches!(self.frontier, Frontier::Current) {
             self.frontier = Frontier::Stale;
         }
         self.pending.push(Command::Notify {

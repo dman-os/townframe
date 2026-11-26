@@ -132,6 +132,11 @@ enum Waiting {
         doc: usize,
         tag: Option<u64>,
     },
+    /// An external author's changes, adding `key`.
+    Ingest {
+        doc: usize,
+        key: String,
+    },
     Read {
         doc: usize,
         must_see: BTreeSet<String>,
@@ -155,6 +160,9 @@ pub(super) struct Sim {
     last_landed: Vec<Option<(u64, ChangeHash)>>,
     acked: Vec<BTreeSet<String>>,
     stale_handles: Vec<(usize, Handle)>,
+    /// The last change an external author sent for each document, and the key it adds.
+    last_ingest: Vec<Option<(Change, String)>>,
+    next_author: Vec<u64>,
     settled: BTreeSet<u64>,
     next_token: u64,
     generation: u64,
@@ -166,6 +174,10 @@ pub(super) struct Sim {
 }
 
 impl Ask {
+    fn writes_storage(&self) -> bool {
+        matches!(self, Ask::Commit(_) | Ask::Publish { .. })
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Ask::Hydrate => "hydrate",
@@ -195,6 +207,8 @@ impl Sim {
             last_landed: vec![None; DOCS],
             acked: vec![BTreeSet::new(); DOCS],
             stale_handles: vec![],
+            last_ingest: vec![None; DOCS],
+            next_author: vec![0; DOCS],
             settled: BTreeSet::new(),
             next_token: 0,
             generation: 0,
@@ -280,9 +294,13 @@ impl Sim {
             }
             Command::Decrypt { call, heads, .. } => {
                 self.check_readable(doc);
+                // the heads may name the change of the write in flight
                 let known = self.world.committed_hashes(doc);
+                let in_flight = self.in_flight_changes(doc);
                 assert!(
-                    heads.iter().all(|head| known.contains(head)),
+                    heads
+                        .iter()
+                        .all(|head| known.contains(head) || in_flight.contains(head)),
                     "heads of the world"
                 );
                 self.fly(doc, call, Ask::Decrypt);
@@ -300,16 +318,14 @@ impl Sim {
             }
             Command::Prepared { plan, result } => self.prepared(doc, plan, result),
             Command::Reply { ticket, result } => self.replied(ticket, result),
+            Command::Ingested { ticket, result } => self.ingested(ticket, result),
             Command::Notify { heads, .. } => {
-                let machine = self.machines[doc].as_ref().expect("a machine notifies");
-                // (an unreadable document's live copy is dropped in the flush that notifies)
-                if let Phase::Live(live) = &machine.doc.phase {
-                    assert_eq!(
-                        live.doc.get_heads(),
-                        heads,
-                        "a notification names the live heads"
-                    );
-                }
+                // listeners are told of committed heads only (law 1)
+                let known = self.world.committed_hashes(doc);
+                assert!(
+                    heads.iter().all(|head| known.contains(head)),
+                    "doc {doc}: a notification names an uncommitted change (law 1)"
+                );
             }
             Command::PublishFrontier { call, heads, rev } => {
                 self.check_publish(doc, rev);
@@ -466,6 +482,24 @@ impl Sim {
         ticket
     }
 
+    /// An external author sends a change, or sends the last one again if `dup`.
+    pub fn ingest(&mut self, doc: usize, dup: bool) -> Ticket {
+        let (change, key) = match (dup, self.last_ingest[doc].clone()) {
+            (true, Some(sent)) => sent,
+            _ => {
+                self.next_author[doc] += 1;
+                let n = self.next_author[doc];
+                let sent = (self.world.author_change(doc, n), format!("e{n}"));
+                self.last_ingest[doc] = Some(sent.clone());
+                sent
+            }
+        };
+        let ticket = self.ticket(Waiting::Ingest { doc, key });
+        self.machine(doc).doc.ingest(ticket, vec![change]);
+        self.flush(doc);
+        ticket
+    }
+
     pub fn read(&mut self, doc: usize) -> Ticket {
         let handle = match self.machine(doc).handles.first() {
             Some(handle) => *handle,
@@ -548,7 +582,8 @@ impl Sim {
         if self.flights.is_empty() {
             return;
         }
-        let flight = self.flights.remove(pick % self.flights.len());
+        let at = pick % self.flights.len();
+        let flight = self.flights.remove(at);
         let doc = flight.doc;
         let cancelled = flight.cancelled && self.draw(2) == 0;
         let readable = self.world.docs[doc].readable;
@@ -640,7 +675,10 @@ impl Sim {
     /// of the writes (law 2) as they land.
     fn land(&mut self, batch: Vec<(usize, Change, Option<FrontierRow>)>) -> Vec<Landed> {
         for (doc, change, _) in &batch {
-            let tag = self.world.new_tag(*doc, change);
+            // an external author's change is built on nothing of ours, and keeps no order
+            let Some(tag) = self.world.new_tag(*doc, change) else {
+                continue;
+            };
             if let Some((last, last_hash)) = self.last_landed[*doc] {
                 assert!(
                     tag > last,
@@ -664,6 +702,12 @@ impl Sim {
     // ── plans ───────────────────────────────────────────────────────────────────────────────
 
     pub fn plan_prepare(&mut self, mask: usize) {
+        self.plan_prepare_kind(mask, None);
+    }
+
+    /// Prepare a plan on the documents of `mask`: each by an ingest or a write as drawn, or all
+    /// of one kind if `ingest` says.
+    pub fn plan_prepare_kind(&mut self, mask: usize, ingest: Option<bool>) {
         let docs: Vec<usize> = (0..DOCS).filter(|doc| mask >> doc & 1 == 1).collect();
         if docs.is_empty() {
             return;
@@ -683,8 +727,14 @@ impl Sim {
                 // a refusal already ended the plan
                 break;
             }
-            let (_, op) = self.write_op(doc, &WriteKind::Normal);
-            self.machine(doc).doc.prepare(plan, op);
+            if ingest.unwrap_or_else(|| self.draw(3) == 0) {
+                self.next_author[doc] += 1;
+                let change = self.world.author_change(doc, self.next_author[doc]);
+                self.machine(doc).doc.prepare_ingest(plan, vec![change]);
+            } else {
+                let (_, op) = self.write_op(doc, &WriteKind::Normal);
+                self.machine(doc).doc.prepare(plan, op);
+            }
             self.flush(doc);
         }
     }
@@ -769,19 +819,35 @@ impl Sim {
     /// The process dies. Bit `i` of `landed` says whether the `i`th commit in flight had
     /// landed. Every machine is rebuilt from the world, as the Hub would.
     pub fn crash(&mut self, landed: usize) {
-        let commits: Vec<usize> = (0..self.flights.len())
-            .filter(|at| matches!(self.flights[*at].ask, Ask::Commit(_)))
-            .collect();
+        // A document's storage writes ran in order, so those that had landed are a prefix.
         let mut batch = vec![];
-        for (bit, at) in commits.into_iter().enumerate() {
-            if landed >> (bit % 8) & 1 == 1 {
-                let flight = &self.flights[at];
-                let Ask::Commit(plan) = &flight.ask else {
-                    unreachable!("filtered");
-                };
-                let change = Change::from_bytes(plan.change.ciphertext.clone()).expect("a change");
-                batch.push((flight.doc, change, plan.frontier.clone()));
+        let mut stopped = BTreeSet::new();
+        let mut publishes = vec![];
+        for (bit, flight) in self
+            .flights
+            .iter()
+            .filter(|flight| flight.ask.writes_storage())
+            .enumerate()
+        {
+            if stopped.contains(&flight.doc) {
+                continue;
             }
+            if landed >> (bit % 8) & 1 == 0 {
+                stopped.insert(flight.doc);
+                continue;
+            }
+            match &flight.ask {
+                Ask::Commit(plan) => {
+                    let change =
+                        Change::from_bytes(plan.change.ciphertext.clone()).expect("a change");
+                    batch.push((flight.doc, change, plan.frontier.clone()));
+                }
+                Ask::Publish { heads, rev } => publishes.push((flight.doc, heads.clone(), *rev)),
+                _ => unreachable!("filtered"),
+            }
+        }
+        for (doc, heads, rev) in publishes {
+            self.world.publish(doc, heads, rev);
         }
         for item in batch {
             self.land(vec![item]);

@@ -21,49 +21,147 @@ fn live() -> Sim {
 }
 
 #[test]
-fn law_1_live_equals_committed() {
+fn law_1_readers_see_only_committed_state() {
     let mut sim = live();
     sim.write(0, WriteKind::Normal);
+    // the change is made, out for encryption, and nobody may look at the document
     assert_eq!(sim.in_flight(0), ["encrypt"]);
-    assert_eq!(
-        sim.live(0),
-        Some(keys(&[])),
-        "nothing applied while encrypting"
-    );
+    sim.read(0);
+    assert_eq!(sim.unanswered(), 2, "the read waits for the write");
     assert!(sim.complete_kind(0, "encrypt", false));
     assert_eq!(sim.in_flight(0), ["commit"]);
-    assert_eq!(
-        sim.live(0),
-        Some(keys(&[])),
-        "nothing applied before Committed"
-    );
-    // the commit fails: the document is unchanged and so is the world
+    assert_eq!(sim.unanswered(), 2, "and still waits: nothing is committed");
+    // the commit lands: the write is answered, then the read, which sees it
+    assert!(sim.complete_kind(0, "commit", false));
+    assert_eq!(sim.unanswered(), 0);
+    assert_eq!(sim.live(0), Some(keys(&["l1"])));
+    assert_eq!(sim.world.visible(0), keys(&["l1"]));
+}
+
+/// A failed commit leaves readers seeing only committed state: the live document is rebuilt
+/// from committed state, and the reads that waited are served from that.
+#[test]
+fn law_1_a_failed_commit_leaves_readers_with_committed_state_only() {
+    let mut sim = live();
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    sim.read(0);
     assert!(sim.complete_kind(0, "commit", true));
+    // the document with the uncommitted change is gone, and the read waits for a new one
+    assert_eq!(sim.live(0), None);
+    assert_eq!(sim.in_flight(0), ["hydrate"]);
+    assert_eq!(
+        sim.unanswered(),
+        1,
+        "the write is answered, the read is not"
+    );
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(
+        sim.unanswered(),
+        0,
+        "the rig checked the read saw no uncommitted key"
+    );
     assert_eq!(sim.live(0), Some(keys(&[])));
     assert_eq!(sim.world.visible(0), keys(&[]));
-    // a commit that lands is applied, and exactly what landed
+    // a later write is made on the rebuilt document and lands
     sim.write(0, WriteKind::Normal);
     assert!(sim.complete_kind(0, "encrypt", false));
     assert!(sim.complete_kind(0, "commit", false));
     assert_eq!(sim.live(0), Some(keys(&["l2"])));
-    assert_eq!(sim.world.visible(0), keys(&["l2"]));
 }
 
 #[test]
-fn law_1_an_aborted_plan_leaves_the_document_unchanged() {
+fn law_1_a_failed_encryption_is_forgotten_too() {
     let mut sim = live();
-    sim.plan_prepare(0b01);
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "encrypt", true));
+    assert_eq!(sim.live(0), None);
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(sim.live(0), Some(keys(&[])));
+}
+
+#[test]
+fn law_1_an_aborted_plan_is_forgotten() {
+    let mut sim = live();
+    sim.plan_prepare_writes(0b01);
     assert_eq!(sim.finishable().len(), 1);
     sim.plan_finish(0, false);
-    assert_eq!(sim.live(0), Some(keys(&[])));
-    assert_eq!(sim.world.visible(0), keys(&[]));
-    sim.plan_prepare(0b01);
-    sim.plan_finish(0, true);
     assert_eq!(
         sim.live(0),
-        Some(keys(&["l2"])),
-        "a committed plan is applied"
+        None,
+        "the document with the plan's change is gone"
     );
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(sim.live(0), Some(keys(&[])));
+    assert_eq!(sim.world.visible(0), keys(&[]));
+    sim.plan_prepare_writes(0b01);
+    sim.plan_finish(0, true);
+    assert_eq!(sim.live(0), Some(keys(&["l2"])), "a committed plan is kept");
+}
+
+/// An external author's change goes through the same path as a write: held until committed,
+/// forgotten if the commit fails, and a repeat is a no-op.
+#[test]
+fn law_1_an_ingested_change_is_visible_only_once_committed() {
+    let mut sim = live();
+    sim.ingest(0, false);
+    sim.read(0);
+    assert_eq!(sim.in_flight(0), ["encrypt"]);
+    assert_eq!(sim.unanswered(), 2);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_kind(0, "commit", true));
+    assert_eq!(sim.live(0), None);
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(sim.live(0), Some(keys(&[])));
+    // sent again, it lands
+    sim.ingest(0, true);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_kind(0, "commit", false));
+    assert_eq!(sim.live(0), Some(keys(&["e1"])));
+    // and sent a third time it changes nothing: no call at all
+    sim.ingest(0, true);
+    assert!(sim.in_flight(0).is_empty());
+    assert_eq!(sim.unanswered(), 0);
+}
+
+/// automerge is a CRDT: remote changes are applied while a write is in flight. If the write
+/// then fails, the new document has the durable remote change and not the local one.
+#[test]
+fn law_1_remote_changes_are_applied_during_a_write_and_survive_its_failure() {
+    let mut sim = live();
+    sim.write(0, WriteKind::Normal);
+    sim.read(0);
+    sim.remote_write(0, true);
+    sim.deliver_all();
+    assert_eq!(sim.in_flight(0), ["encrypt", "decrypt"]);
+    assert!(sim.complete_kind(0, "decrypt", false));
+    assert_eq!(
+        sim.live(0),
+        Some(keys(&["l1", "r1"])),
+        "applied alongside the write"
+    );
+    assert_eq!(sim.unanswered(), 2, "the read still waits");
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_kind(0, "commit", true));
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(sim.live(0), Some(keys(&["r1"])));
+    assert_eq!(sim.unanswered(), 0);
+}
+
+/// The frontier's rows are written one at a time: a write waits for the publication in flight.
+#[test]
+fn law_5_a_write_waits_for_the_publication_in_flight() {
+    let mut sim = live();
+    sim.remote_write(0, true);
+    sim.deliver_all();
+    assert!(sim.complete_kind(0, "decrypt", false));
+    assert_eq!(sim.in_flight(0), ["publish"]);
+    sim.write(0, WriteKind::Normal);
+    assert_eq!(sim.in_flight(0), ["publish"], "the write waits");
+    assert!(sim.complete_kind(0, "publish", false));
+    assert_eq!(sim.in_flight(0), ["encrypt"]);
+    sim.quiesce();
+    assert_eq!(sim.world.frontier_rev(0), sim.world.tree_rev(0));
 }
 
 #[test]
@@ -106,20 +204,20 @@ fn law_3_read_your_writes() {
 #[test]
 fn law_4_plans_hold_the_document() {
     let mut sim = live();
-    sim.plan_prepare(0b01);
+    sim.plan_prepare_writes(0b01);
     assert_eq!(sim.describe(0).split(' ').nth(1), Some("held"));
     // a write and a remote change arrive while the plan holds the document
     sim.write(0, WriteKind::Normal);
     sim.remote_write(0, true);
     sim.deliver_all();
+    // remote content is applied alongside the hold, but no write starts
     assert_eq!(
         sim.in_flight(0),
-        Vec::<&str>::new(),
-        "nothing starts while held"
+        ["decrypt"],
+        "nothing else starts while held"
     );
     sim.plan_finish(0, true);
     // the held write resumes, after the plan's change
-    assert!(sim.complete_kind(0, "decrypt", false) || sim.in_flight(0) == ["encrypt"]);
     sim.quiesce();
     assert_eq!(sim.live(0), Some(keys(&["l1", "l2", "r1"])));
 }

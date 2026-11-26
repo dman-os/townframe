@@ -38,6 +38,9 @@ pub(in crate::document) struct DocModel {
 
 pub(in crate::document) struct World {
     pub docs: Vec<DocModel>,
+    /// Whether a commit's frontier row is checked against the revision it expects. Off, it is
+    /// written whatever the tree held (a store without the compare-and-set).
+    pub cas: bool,
     rev: Rev,
 }
 
@@ -88,6 +91,7 @@ impl World {
                 })
                 .collect(),
             rev: 0,
+            cas: true,
         }
     }
 
@@ -97,15 +101,32 @@ impl World {
         visible.keys(ROOT).collect()
     }
 
-    /// The tag of the write that made `change`: the one root key it adds to the committed
-    /// document.
-    pub fn new_tag(&self, doc: usize, change: &Change) -> u64 {
+    /// A change an external author builds on a document of their own, with no history: it adds
+    /// the key `e{n}`.
+    pub fn author_change(&self, doc: usize, n: u64) -> Change {
+        let mut actor = vec![0xc0, doc as u8];
+        actor.extend(n.to_be_bytes());
+        let mut author = Automerge::new().with_actor(ActorId::from(actor));
+        let mut tx = author.transaction();
+        tx.put(ROOT, format!("e{n}"), 0_i64)
+            .expect("the author writes");
+        tx.commit();
+        author
+            .get_last_local_change()
+            .expect("the change just made")
+    }
+
+    /// The tag of the local write that made `change`: the one root key it adds to the committed
+    /// document, `l{tag}`. An external author's change has none.
+    pub fn new_tag(&self, doc: usize, change: &Change) -> Option<u64> {
         let all = || self.docs[doc].changes.iter().map(|stored| &stored.change);
         let before: BTreeSet<String> = load(all()).keys(ROOT).collect();
         let after: BTreeSet<String> = load(all().chain([change])).keys(ROOT).collect();
         let added: Vec<_> = after.difference(&before).collect();
         assert_eq!(added.len(), 1, "a write adds one key");
-        added[0][1..].parse().expect("a tag")
+        added[0]
+            .strip_prefix('l')
+            .map(|tag| tag.parse().expect("a tag"))
     }
 
     pub fn visible(&self, doc: usize) -> BTreeSet<String> {
@@ -178,7 +199,7 @@ impl World {
             model.tree_rev = rev;
             landed.push(Landed { rev, prior_rev });
             rows.extend(
-                row.filter(|row| row.if_prior_rev == prior_rev)
+                row.filter(|row| !self.cas || row.if_prior_rev == prior_rev)
                     .map(|row| (doc, row)),
             );
         }

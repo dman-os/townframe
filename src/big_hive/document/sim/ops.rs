@@ -15,6 +15,11 @@ pub(in crate::document) enum Op {
     Read {
         doc: u8,
     },
+    /// An external author sends a change (or the last one again).
+    Ingest {
+        doc: u8,
+        dup: bool,
+    },
     Open {
         doc: u8,
     },
@@ -75,6 +80,9 @@ impl Sim {
                 };
                 self.write(doc(d), kind);
             }
+            Op::Ingest { doc: d, dup } => {
+                self.ingest(doc(d), dup);
+            }
             Op::Read { doc: d } => {
                 self.read(doc(d));
             }
@@ -110,6 +118,7 @@ pub(in crate::document) fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         8 => (any::<u8>(), any::<u8>()).prop_map(|(doc, kind)| Op::Write { doc, kind }),
         4 => any::<u8>().prop_map(|doc| Op::Read { doc }),
+        5 => (any::<u8>(), any::<bool>()).prop_map(|(doc, dup)| Op::Ingest { doc, dup }),
         3 => any::<u8>().prop_map(|doc| Op::Open { doc }),
         3 => (any::<u8>(), any::<u8>()).prop_map(|(doc, pick)| Op::DropHandle { doc, pick }),
         2 => (any::<u8>(), any::<bool>()).prop_map(|(doc, acquire)| Op::Interest { doc, acquire }),

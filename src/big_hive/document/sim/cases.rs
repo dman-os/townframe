@@ -134,8 +134,8 @@ fn caught(plant: Plant, law: &str) {
 }
 
 #[test]
-fn planted_apply_before_commit_is_caught() {
-    caught(Plant::ApplyBeforeCommit, "law 1");
+fn planted_read_served_while_a_write_is_in_flight_is_caught() {
+    caught(Plant::ServeReadsDuringWrite, "law 1");
 }
 
 #[test]
@@ -156,6 +156,54 @@ fn planted_plan_that_does_not_hold_is_caught() {
 #[test]
 fn planted_hydration_of_an_unreadable_document_is_caught() {
     caught(Plant::HydrateUnreadable, "law 8");
+}
+
+#[test]
+fn planted_publication_during_a_write_is_caught() {
+    caught(Plant::PublishDuringWrite, "law 1");
+}
+
+#[test]
+fn planted_write_while_publishing_is_caught() {
+    caught(Plant::WriteWhilePublishing, "frontier");
+}
+
+#[test]
+fn planted_notification_during_a_write_is_caught() {
+    caught(Plant::NotifyDuringWrite, "law 1");
+}
+
+#[test]
+fn planted_frontier_row_by_the_current_revision_is_caught() {
+    caught(Plant::FrontierByCurrentRev, "law 5");
+}
+
+/// The compare-and-set on a frontier row is needed: ordering the writes keeps rows in order,
+/// but a store without it writes a row that claims remote content the machine never applied.
+#[test]
+fn without_the_compare_and_set_a_frontier_row_claims_unapplied_content() {
+    let mut caught = None;
+    'cases: for seed in 0..16u8 {
+        for (at, ops) in cases(seed, 24, 200).into_iter().enumerate() {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut sim = Sim::new(u64::from(seed), None);
+                sim.world.cas = false;
+                for op in ops {
+                    sim.step(op);
+                }
+                sim.quiesce();
+            }));
+            if let Err(payload) = result {
+                caught = Some((seed, at, panic_message(payload.as_ref())));
+                break 'cases;
+            }
+        }
+    }
+    let (seed, at, message) = caught.expect("a store without the compare-and-set was not caught");
+    assert!(
+        message.contains("frontier"),
+        "seed {seed} case {at} failed, but not on the frontier: {message}"
+    );
 }
 
 #[test]
