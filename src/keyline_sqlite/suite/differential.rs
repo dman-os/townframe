@@ -293,6 +293,7 @@ mod deep {
     }
 
     fn agree(certs: &[VerifiedCertificate<()>], batch: usize) {
+        eprintln!("DEEP start certs={} batch={batch}", certs.len());
         let db = fresh_db();
         let sqlite = SqliteKeyline::<(), _>::new(db.clone());
         let memory = MemoryKeyline::<()>::new();
@@ -301,7 +302,9 @@ mod deep {
             block_on(Keyline::<Local>::insert(&sqlite, chunk.to_vec())).unwrap();
         }
         let expected = answers(&memory, certs);
+        eprintln!("DEEP memory answered");
         assert_eq!(answers(&sqlite, certs), expected, "the store that inserted");
+        eprintln!("DEEP sqlite answered");
         let reopened = SqliteKeyline::<(), _>::new(db);
         assert_eq!(answers(&reopened, certs), expected, "a store that verifies the rows");
     }
