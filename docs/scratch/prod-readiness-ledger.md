@@ -1216,3 +1216,58 @@ inside the transaction. This ties together:
   another repository.
 - **`townframe-changes`** in both forks now carries the Keyline commits, for our own use. The old
   commits are kept at `townframe-changes-pre-keyline`, so townframe's rev pins stay reachable.
+
+## End of day, 2026-11-26
+
+**Stack #166 (21 PRs, all drafts):**
+- 18 = `9f347f48`:
+  - browser serving over iroh, with the hyper fork pin `dman-os/hyper@388ad263`;
+  - long-poll machine with linger and the client hint;
+  - sync-stall fix (leaf order);
+  - benchmarks with `x/bench.ts` and the skill;
+  - sim determinism;
+  - LWW payloads;
+  - cleanup;
+  - mbx 1.31;
+  - the docs.
+- 19 #359 = `f4162b01`: SQLite part store and okv; `Rev::MAX` read fix; driver shared-writer
+  deadlock fix; whole-machine SQLite stress suite.
+- 20 #430 = `396d10ab`: `keyline_sqlite`.
+- 21 #434 = `d319c4d8`: a peer never changes membership; held notifications in the outbox.
+
+**Forks:**
+- `townframe-changes` now carries the Keyline commits:
+  - keyhive `6b3370c`, on upstream main;
+  - subduction `2b3276f`, on upstream `main` → `keyline-take-2` (#342) → `keyhive-e2e` (#414).
+- The old commits are at `townframe-changes-pre-keyline`.
+- Fork-only drafts for operator review:
+  - subduction#1 fragment own head;
+  - subduction#2 admit by payload id;
+  - keyhive#1 `PcsKeyError`;
+  - keyhive#2 rotated CGKA secret;
+  - keyhive#3 prepare/apply, stacked on #2;
+  - keyhive#4 concurrent-epoch gap report.
+
+**Docs:**
+- `big-repo-port-ledger.md` (the map);
+- `big-repo-runtime-design.md` (high-level design);
+- `upstream-study-2026-11-26.md`.
+
+**In flight at close:**
+- membership follow-ups: parts recorded on held rows; the index moves only on commit;
+- one `sqlite_rs` database-handle trait, and shared `keyline_sqlite` bench workloads;
+- subduction#2 batch-response test.
+
+**Next:**
+1. Operator reviews the fork drafts; open the upstream PRs from them.
+2. Keyline repin in townframe, which starts big_repo.
+3. The file-by-file pass over big_repo together, landing `big_repo::runtime` beside `runtime2`.
+
+**Queued:**
+- surelock upgrade survey (async mutexes not authorized);
+- service cuts A/B on nodules' ping;
+- browser SQLite when big_repo goes to the browser.
+
+**Infrastructure:** the laptop drive `p3N` dropped twice (USB/UAS resets, then an ntfs3 crash),
+and chkdsk repaired it. Lanes run on the motherships. `ms-run` copies by checksum, so laptop
+mtimes can't keep stale cargo units. The lead verifies in its own mothership worktree.
