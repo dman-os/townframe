@@ -307,7 +307,9 @@ mod deep {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(48))]
+        #![proptest_config(ProptestConfig::with_cases(
+            std::env::var("PROPTEST_CASES").ok().and_then(|cases| cases.parse().ok()).unwrap_or(48),
+        ))]
 
         #[test]
         fn sqlite_matches_memory_on_deeper_graphs(
