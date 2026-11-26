@@ -1,6 +1,6 @@
 # big_hive runtime: execution model
 
-Status: Draft for operator review (2026-11-26). Section 1 of the agreed order: execution model,
+Status: Aspirational (operator, 2026-11-26): agreed direction, known to be incomplete. It is refined file by file as runtime2 is ported, and the code's module docs become the authority as each part lands. Order: execution model,
 then the simulation harness, then machines, then the hub, then the services.
 Owner: the automata lane (prod-readiness).
 Scope: how big_hive's logic is split into sans-IO machines and drivers, how they talk, how
