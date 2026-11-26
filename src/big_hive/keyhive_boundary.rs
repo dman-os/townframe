@@ -23,12 +23,19 @@
 //! issues [`Command::Encrypt`] and answers [`Command::Encrypted`]. Encrypting changes no memory
 //! in keyhive. The asker commits the change with its other rows and then reports the result with
 //! [`KeyhiveBoundary::settle_encrypt`]: `applied` (the commit landed, so keyhive applies the
-//! preparation) or dropped. Encryptions for different documents run at the same time. A
-//! preparation holds the shared lock from `Encrypt` until it is settled, and not only around
-//! the apply. The reason is the exclusive path: a membership change that landed between the
-//! preparation and the commit (a removal, say) would leave the prepared key stale, and applying
-//! it afterwards would encrypt for a reader who is no longer one. So a locked operation waits
-//! for every preparation to commit and settle, and new preparations wait behind it.
+//! preparation) or dropped. Encryptions for different documents run at the same time.
+//!
+//! The shared lock covers each keyhive call itself (`Encrypt`, `Decrypt`, `ApplyEncrypt`,
+//! `Hydrate`) and nothing longer: a prepared encryption waiting for its commit holds no lock,
+//! so a membership change does not wait for plans to commit. Safety is validated at the commit
+//! instead (optimistic concurrency). [`Command::Encrypted`] carries the document's key epoch
+//! the encryption was made under ([`Sealed::epoch`]), a per-document CGKA version that the store
+//! bumps whenever a CGKA op for the document is appended. The commit executor checks each plan
+//! document's epoch against it, and a plan whose epoch has moved fails as stale and is prepared
+//! again. That is what keeps a key prepared before a removal from landing after it. Apply
+//! happens after the commit, so a locked operation may have run in between: then the apply is
+//! refused as stale and the document is evicted, so keyhive reloads it from the rows. If the
+//! instance was reopened in between, the preparation is gone with it and nothing is applied.
 //!
 //! **Decryption** (shared lock) is the same kind of keyhive call: [`KeyhiveBoundary::decrypt`]
 //! hydrates the document if it is not loaded, issues [`Command::Decrypt`] and answers
@@ -105,9 +112,9 @@
 //! 2. **The locked path is all or nothing, and a failure reopens.** A locked operation's rows
 //!    land with its commit or not at all, and after a failure no keyhive call is issued before
 //!    the instance has been reopened.
-//! 3. **The lock is exclusive.** [`Command::AcquireLock`] is issued with no encryption in flight
-//!    (prepared and unsettled counts), no decryption and no hydration in flight, and no keyhive
-//!    call other than the operation's own is issued until [`Command::ReleaseLock`].
+//! 3. **The lock is exclusive.** No keyhive call runs during a locked operation, and
+//!    [`Command::AcquireLock`] is issued only when no keyhive call (hydration, encryption,
+//!    decryption, apply) is in flight. A preparation waiting for its commit is not a call.
 //! 4. **Notifications are targeted and once.** A [`Command::Notify`] goes only to a connected
 //!    session, only with events the latest Keyline answer granted it, never with an event from
 //!    that session, and no event goes to a session twice.
@@ -119,6 +126,8 @@
 //! 8. **A refused refill is retried.** After a refused operation that carried the refill, the
 //!    machine has a deadline ([`KeyhiveBoundary::next_due`]) at which it runs another, and the
 //!    floor is restored once the driver lets it.
+//! 9. **The epoch travels with the encryption.** [`Command::Encrypted`] carries the epoch the
+//!    driver reported for the preparation, unchanged.
 //!
 //! # Where its neighbours come in
 //!
@@ -141,7 +150,6 @@ use std::time::Duration;
 
 use crate::coordinator::DocId;
 use crate::document::CallId;
-use crate::document::EncryptedChange;
 use crate::document::Instant;
 use crate::document::Outcome;
 use crate::document::Ticket;
@@ -213,6 +221,21 @@ pub enum Ended<T> {
 pub struct Prepared {
     pub ciphertext: Vec<u8>,
     pub events: Vec<EventId>,
+    /// The document's key epoch the encryption was made under.
+    pub epoch: Epoch,
+}
+
+/// A document's key epoch: a per-document CGKA version, bumped by the store whenever a CGKA op
+/// for the document is appended.
+pub type Epoch = u64;
+
+/// An encryption as the asker sees it, not yet applied: `token` names the preparation for
+/// [`KeyhiveBoundary::settle_encrypt`], and `epoch` is what the commit executor validates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sealed {
+    pub token: u64,
+    pub ciphertext: Vec<u8>,
+    pub epoch: Epoch,
 }
 
 /// What keyhive reported for a locked operation, written in the operation's transaction.
@@ -313,7 +336,7 @@ pub enum Command {
     Encrypted {
         to: Asker,
         call: CallId,
-        outcome: Outcome<EncryptedChange>,
+        outcome: Outcome<Sealed>,
     },
     /// The answer to a [`KeyhiveBoundary::decrypt`].
     Decrypted {
@@ -350,6 +373,8 @@ pub(crate) enum Plant {
     SkipReopen,
     /// An encryption is issued on a document that is not loaded (law 5).
     SkipHydrate,
+    /// The encryption's answer carries the wrong epoch (law 9).
+    WrongEpoch,
     /// A run below the prekey floor does not ask for a refill (law 6).
     SkipRefill,
     /// The machine keeps issuing commands after a trap (law 7).
@@ -370,8 +395,10 @@ enum Load {
 enum TokenState {
     /// `Encrypt` is out for `asker`'s `call`.
     Encrypting { asker: Asker, call: CallId },
-    /// Answered, waiting for the commit's verdict.
+    /// Answered, waiting for the commit's verdict. Holds no lock.
     Prepared { events: Vec<EventId> },
+    /// Settled as applied: its apply waits for the lock to be free.
+    ApplyWanted { events: Vec<EventId> },
     /// `ApplyEncrypt` is out.
     Applying { call: CallId, events: Vec<EventId> },
 }
@@ -379,6 +406,8 @@ enum TokenState {
 struct Token {
     doc: DocId,
     state: TokenState,
+    /// The instance it was prepared on was reopened: nothing is applied.
+    lost: bool,
 }
 
 /// What a held request wants done to its document.
@@ -518,21 +547,26 @@ impl KeyhiveBoundary {
         if self.trapped {
             return;
         }
-        let state = self
+        let entry = self
             .tokens
             .get_mut(&token)
             .expect("settling a preparation that is held");
-        let TokenState::Prepared { events } = &mut state.state else {
+        let TokenState::Prepared { events } = &mut entry.state else {
             panic!("a preparation is settled once, after its answer");
         };
         let events = std::mem::take(events);
+        let lost = entry.lost;
         #[cfg(test)]
         let applied = applied || self.plant == Some(Plant::ApplyDropped);
-        if applied {
-            let call = self.fresh_call();
-            let state = self.tokens.get_mut(&token).expect("held");
-            state.state = TokenState::Applying { call, events };
-            self.pending.push(Command::ApplyEncrypt { call, token });
+        if lost {
+            // the instance it was prepared on is gone; the commit landed, so its events are
+            // durable and told, but there is nothing to apply
+            self.tokens.remove(&token);
+            if applied {
+                self.publish(events.into_iter().map(|event| (event, None)));
+            }
+        } else if applied {
+            entry.state = TokenState::ApplyWanted { events };
         } else {
             self.tokens.remove(&token);
             self.pending.push(Command::DropEncrypt { token });

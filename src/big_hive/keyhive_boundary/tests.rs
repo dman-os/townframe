@@ -130,33 +130,6 @@ fn law_2_a_refused_commit_also_rolls_back_and_reopens() {
 }
 
 #[test]
-fn law_3_the_lock_waits_for_encryptions_and_blocks_new_ones() {
-    let mut sim = Sim::new(1, None);
-    prepared(&mut sim, 0);
-    let ticket = sim.locked(None);
-    assert!(
-        sim.kinds().is_empty(),
-        "a preparation still holds the shared lock"
-    );
-    // a new encryption queues behind the locked operation
-    sim.encrypt(1);
-    assert!(sim.kinds().is_empty());
-    sim.settle(0, 0);
-    sim.complete_all("apply");
-    assert_eq!(sim.kinds(), ["lock"]);
-    for kind in ["lock", "begin", "run", "commit"] {
-        assert!(sim.complete_kind(kind, 0));
-    }
-    assert_eq!(sim.reply(ticket), Some(&Ok(())));
-    assert_eq!(
-        sim.kinds().len(),
-        1,
-        "the held encryption starts after the release"
-    );
-    sim.quiesce();
-}
-
-#[test]
 fn law_3_locked_operations_run_one_at_a_time_in_order() {
     let mut sim = Sim::new(1, None);
     let first = sim.locked(None);
@@ -541,4 +514,126 @@ fn law_7_a_store_failure_in_a_decryption_traps() {
     sim.complete_all("hydrate");
     assert!(sim.complete_kind("decrypt", 2));
     assert!(sim.m.is_trapped());
+}
+
+#[test]
+fn law_3_an_encryption_in_flight_holds_the_lock_off_and_the_lock_holds_new_ones_back() {
+    let mut sim = Sim::new(1, None);
+    sim.encrypt(0);
+    sim.complete_all("hydrate");
+    assert_eq!(sim.kinds(), ["encrypt"]);
+    let ticket = sim.locked(None);
+    assert_eq!(sim.kinds(), ["encrypt"], "the lock waits for the call");
+    sim.encrypt(1);
+    assert_eq!(
+        sim.kinds(),
+        ["encrypt"],
+        "a new one waits behind the operation"
+    );
+    sim.complete_all("encrypt");
+    assert_eq!(sim.kinds(), ["lock"]);
+    for kind in ["lock", "begin", "run", "commit"] {
+        assert!(sim.complete_kind(kind, 0));
+    }
+    assert_eq!(sim.reply(ticket), Some(&Ok(())));
+    assert_eq!(
+        sim.kinds().len(),
+        1,
+        "the held encryption starts after the release"
+    );
+    sim.quiesce();
+}
+
+#[test]
+fn law_3_a_prepared_encryption_waiting_for_its_commit_does_not_hold_the_lock() {
+    let mut sim = Sim::new(1, None);
+    prepared(&mut sim, 0);
+    let ticket = sim.locked(None);
+    assert_eq!(
+        sim.kinds(),
+        ["lock"],
+        "nothing is in flight, so the lock is taken"
+    );
+    for kind in ["lock", "begin", "run", "commit"] {
+        assert!(sim.complete_kind(kind, 0));
+    }
+    assert_eq!(sim.reply(ticket), Some(&Ok(())));
+    sim.quiesce();
+}
+
+#[test]
+fn law_3_a_settlement_during_a_locked_operation_applies_after_it() {
+    let mut sim = Sim::new(1, None);
+    prepared(&mut sim, 0);
+    sim.locked(None);
+    for kind in ["lock", "begin"] {
+        assert!(sim.complete_kind(kind, 0));
+    }
+    // the commit landed meanwhile; keyhive is busy, so the apply waits for the release
+    sim.settle(0, 0);
+    assert_eq!(sim.kinds(), ["run"]);
+    assert!(sim.complete_kind("run", 0));
+    assert!(sim.complete_kind("commit", 0));
+    assert_eq!(sim.kinds(), ["apply"]);
+    sim.quiesce();
+}
+
+#[test]
+fn the_epoch_the_encryption_was_made_under_travels_with_its_answer() {
+    let mut sim = Sim::new(1, None);
+    prepared(&mut sim, 0);
+    assert!(sim.log.iter().any(|c| c.contains("epoch: 0")));
+    // a membership change touching document 0 moves its epoch
+    sim.report_hydrating(vec![0]);
+    run_locked(&mut sim, None);
+    assert_eq!(sim.epoch(0), 1);
+    prepared(&mut sim, 0);
+    assert!(sim.log.iter().any(|c| c.contains("epoch: 1")));
+    sim.quiesce();
+}
+
+#[test]
+fn an_encryption_made_before_a_membership_change_is_stale_at_its_commit() {
+    let mut sim = Sim::new(1, None);
+    prepared(&mut sim, 0);
+    sim.report_hydrating(vec![0]);
+    run_locked(&mut sim, None);
+    // the commit executor sees the epoch moved and fails the plan: dropped, never applied
+    sim.settle(0, 0);
+    assert!(sim.kinds().is_empty());
+    assert!(!sim.log.iter().any(|c| c.starts_with("ApplyEncrypt")));
+    assert!(sim.log.iter().any(|c| c.starts_with("DropEncrypt")));
+    sim.quiesce();
+}
+
+#[test]
+fn a_stale_apply_evicts_the_document_so_keyhive_reloads_it() {
+    let mut sim = Sim::new(1, None);
+    prepared(&mut sim, 0);
+    sim.settle(0, 0);
+    // a locked operation ran between the commit and the apply: the apply is refused
+    assert_eq!(sim.kinds(), ["apply"]);
+    assert!(sim.complete_kind("apply", 1));
+    assert!(sim.log.iter().any(|c| c.starts_with("Evict")));
+    sim.encrypt(0);
+    assert_eq!(sim.kinds(), ["hydrate"]);
+    sim.quiesce();
+}
+
+#[test]
+fn law_2_a_preparation_made_before_a_reopen_is_not_applied_after_it() {
+    let mut sim = Sim::new(1, None);
+    prepared(&mut sim, 0);
+    let ticket = sim.locked(None);
+    for kind in ["lock", "begin"] {
+        assert!(sim.complete_kind(kind, 0));
+    }
+    assert!(sim.complete_kind("run", 1));
+    assert!(sim.complete_kind("rollback", 0));
+    assert!(sim.complete_kind("reopen", 0));
+    assert_eq!(sim.reply(ticket), Some(&Err(Refused)));
+    // the commit landed all the same: the preparation died with the old instance
+    sim.settle(0, 0);
+    assert!(!sim.log.iter().any(|c| c.starts_with("ApplyEncrypt")));
+    sim.quiesce();
 }

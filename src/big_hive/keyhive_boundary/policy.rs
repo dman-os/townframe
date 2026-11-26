@@ -33,10 +33,18 @@ impl KeyhiveBoundary {
         self.ask_due(now);
     }
 
-    /// How many calls hold the shared lock: hydrations and decryptions while out, and every
-    /// preparation until settled.
+    /// How many calls hold the shared lock: the keyhive calls out. A preparation waiting for
+    /// its commit is not one.
     pub(super) fn shared(&self) -> usize {
-        self.tokens.len()
+        self.tokens
+            .values()
+            .filter(|token| {
+                matches!(
+                    token.state,
+                    TokenState::Encrypting { .. } | TokenState::Applying { .. }
+                )
+            })
+            .count()
             + self.decrypting.len()
             + self
                 .docs
@@ -59,6 +67,22 @@ impl KeyhiveBoundary {
     /// Hydrate what the held requests need and issue the encryptions that can start, keeping
     /// the order of one document's requests.
     pub(super) fn issue_shared(&mut self) {
+        let wanted: Vec<u64> = self
+            .tokens
+            .iter()
+            .filter(|(_, token)| matches!(token.state, TokenState::ApplyWanted { .. }))
+            .map(|(token, _)| *token)
+            .collect();
+        for token in wanted {
+            let call = self.fresh_call();
+            let entry = self.tokens.get_mut(&token).expect("listed above");
+            let TokenState::ApplyWanted { events } = &mut entry.state else {
+                unreachable!("listed above");
+            };
+            let events = std::mem::take(events);
+            entry.state = TokenState::Applying { call, events };
+            self.pending.push(Command::ApplyEncrypt { call, token });
+        }
         let held = std::mem::take(&mut self.held);
         for request in held {
             let load = self.docs.get(&request.doc).copied();
@@ -78,6 +102,7 @@ impl KeyhiveBoundary {
                             call,
                             Token {
                                 doc: request.doc,
+                                lost: false,
                                 state: TokenState::Encrypting {
                                     asker: request.asker,
                                     call: request.call,
@@ -125,7 +150,10 @@ impl KeyhiveBoundary {
                     self.evict_wanted.insert(doc);
                 }
                 Some(Load::Loaded)
-                    if self.tokens.values().any(|token| token.doc == doc)
+                    if self
+                        .tokens
+                        .values()
+                        .any(|token| token.doc == doc && !token.lost)
                         || self.decrypting.values().any(|(_, _, d)| *d == doc) =>
                 {
                     self.evict_wanted.insert(doc);

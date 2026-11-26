@@ -275,6 +275,11 @@ fn planted_decryption_without_a_hydration_is_caught() {
 }
 
 #[test]
+fn planted_wrong_epoch_is_caught() {
+    caught(Plant::WrongEpoch, "law 9");
+}
+
+#[test]
 fn planted_refill_that_is_never_retried_is_caught() {
     caught(Plant::NoRefillRetry, "law 8");
 }

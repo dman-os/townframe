@@ -46,7 +46,7 @@ pub(super) const CLASSES: u64 = 3;
 
 enum Ask {
     Hydrate(DocId),
-    Encrypt,
+    Encrypt(DocId),
     Decrypt,
     Apply(u64),
     Lock,
@@ -73,6 +73,8 @@ struct Flight {
 /// An encryption the machine answered, waiting for the sim's commit to be settled.
 struct Prep {
     token: u64,
+    doc: DocId,
+    epoch: Epoch,
 }
 
 pub(super) struct Sim {
@@ -80,6 +82,14 @@ pub(super) struct Sim {
     o: Oracle,
     flights: Vec<Flight>,
     prepared: Vec<Prep>,
+    /// The document and epoch of each encryption the driver answered, by token.
+    sealed: BTreeMap<u64, (DocId, Epoch)>,
+    /// Each document's key epoch: bumped when a locked operation that touched it commits, as
+    /// the store bumps it when a CGKA op for the document is appended.
+    epochs: [Epoch; DOCS as usize],
+    /// The documents the open transaction's run touched.
+    tx_docs: Vec<DocId>,
+    forced_hydrated: Option<Vec<DocId>>,
     /// The session of each slot, when connected, and Keyline's standing per slot and class.
     slots: [Option<SessionId>; SLOTS],
     standing: [[bool; CLASSES as usize]; SLOTS],
@@ -111,6 +121,10 @@ impl Sim {
             o: Oracle::new(Config::default().prekey_floor),
             flights: vec![],
             prepared: vec![],
+            sealed: BTreeMap::new(),
+            epochs: [0; DOCS as usize],
+            tx_docs: vec![],
+            forced_hydrated: None,
             slots: [None; SLOTS],
             standing: [[true; CLASSES as usize]; SLOTS],
             replies: BTreeMap::new(),
@@ -172,7 +186,7 @@ impl Sim {
     fn act(&mut self, command: Command) {
         match command {
             Command::Hydrate { call, doc } => self.fly(call, Ask::Hydrate(doc)),
-            Command::Encrypt { call, .. } => self.fly(call, Ask::Encrypt),
+            Command::Encrypt { call, doc, .. } => self.fly(call, Ask::Encrypt(doc)),
             Command::Decrypt { call, .. } => self.fly(call, Ask::Decrypt),
             Command::ApplyEncrypt { call, token } => self.fly(call, Ask::Apply(token)),
             Command::AcquireLock { call } => self.fly(call, Ask::Lock),
@@ -194,8 +208,13 @@ impl Sim {
                     .cancelled = true;
             }
             Command::Encrypted { outcome, .. } => {
-                if let Outcome::Done(enc) = outcome {
-                    self.prepared.push(Prep { token: enc.token });
+                if let Outcome::Done(sealed) = outcome {
+                    let (doc, epoch) = self.sealed[&sealed.token];
+                    self.prepared.push(Prep {
+                        token: sealed.token,
+                        doc,
+                        epoch,
+                    });
                 }
             }
             Command::Reply { ticket, result } => {
@@ -318,10 +337,15 @@ impl Sim {
             return;
         }
         let prep = self.prepared.remove(pick % self.prepared.len());
-        if mode % 3 != 1 {
+        // the commit executor validates the epoch: a plan whose document's epoch moved since the
+        // encryption is stale and does not commit
+        let stale = self.epochs[prep.doc as usize] != prep.epoch;
+        let applied = mode.is_multiple_of(3) && !stale;
+        if mode % 3 != 1 && !stale {
             self.o.landed(prep.token);
         }
-        self.m.settle_encrypt(prep.token, mode.is_multiple_of(3));
+        self.o.settled(prep.token, applied);
+        self.m.settle_encrypt(prep.token, applied);
         self.pump();
     }
 
@@ -353,7 +377,9 @@ impl Sim {
                 self.o.hydrated(doc, &ended);
                 self.m.hydrated(call, ended);
             }
-            Ask::Encrypt => {
+            Ask::Encrypt(doc) => {
+                let epoch = self.epochs[doc as usize];
+                self.sealed.insert(call, (doc, epoch));
                 let events = if self.draw(4) == 0 {
                     vec![self.fresh_event()]
                 } else {
@@ -365,6 +391,7 @@ impl Sim {
                     ended!(Ended::Done(Prepared {
                         ciphertext: vec![9],
                         events: events.clone(),
+                        epoch,
                     }))
                 };
                 self.o.encrypted(call, &ended);
@@ -380,8 +407,13 @@ impl Sim {
                 self.m.decrypted(call, ended);
             }
             Ask::Apply(token) => {
-                let ended = ended!(Ended::Done(()));
-                self.o.applied(token, &ended);
+                // a locked operation ran since the commit: keyhive's preparation is stale
+                let ended = if refuse && !cancelled {
+                    Ended::Refused
+                } else {
+                    ended!(Ended::Done(()))
+                };
+                self.o.applied(call, token, &ended);
                 self.m.applied(call, ended);
             }
             Ask::Lock => self.m.lock_acquired(call),
@@ -414,6 +446,11 @@ impl Sim {
                 } else {
                     ended!(Ended::Done(()))
                 };
+                if ended == Ended::Done(()) {
+                    for doc in std::mem::take(&mut self.tx_docs) {
+                        self.epochs[doc as usize] += 1;
+                    }
+                }
                 self.o.committed(&ended);
                 self.m.committed(call, ended);
             }
@@ -465,9 +502,17 @@ impl Sim {
             };
             events.push((self.fresh_event(), source));
         }
-        let hydrated = (0..self.draw(3) as u64)
-            .map(|d| (d + self.draw(2) as u64) % DOCS)
-            .collect();
+        let hydrated: Vec<DocId> = match self.forced_hydrated.take() {
+            Some(docs) => docs,
+            None => {
+                let mut docs: Vec<DocId> = (0..self.draw(3) as u64)
+                    .map(|d| (d + self.draw(2) as u64) % DOCS)
+                    .collect();
+                docs.dedup();
+                docs
+            }
+        };
+        self.tx_docs = hydrated.clone();
         let prekeys = if refill {
             self.m.config.prekey_floor + self.draw(3)
         } else {
@@ -540,7 +585,7 @@ impl Sim {
             .iter()
             .map(|flight| match flight.ask {
                 Ask::Hydrate(_) => "hydrate",
-                Ask::Encrypt => "encrypt",
+                Ask::Encrypt(_) => "encrypt",
                 Ask::Decrypt => "decrypt",
                 Ask::Apply(_) => "apply",
                 Ask::Lock => "lock",
@@ -586,6 +631,15 @@ impl Sim {
 }
 
 impl Sim {
+    /// The next run touches exactly these documents (their epochs move when it commits).
+    pub fn report_hydrating(&mut self, docs: Vec<DocId>) {
+        self.forced_hydrated = Some(docs);
+    }
+
+    pub fn epoch(&self, doc: DocId) -> Epoch {
+        self.epochs[doc as usize]
+    }
+
     /// The next run reports exactly these events.
     pub fn report_next(&mut self, events: Vec<(EventId, Option<SessionId>)>) {
         self.forced = Some(events);

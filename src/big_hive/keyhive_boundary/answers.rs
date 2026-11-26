@@ -43,15 +43,24 @@ impl KeyhiveBoundary {
         };
         match ended {
             Ended::Done(prepared) => {
+                #[cfg(test)]
+                let epoch = if self.plant == Some(Plant::WrongEpoch) {
+                    0
+                } else {
+                    prepared.epoch
+                };
+                #[cfg(not(test))]
+                let epoch = prepared.epoch;
                 token.state = TokenState::Prepared {
                     events: prepared.events,
                 };
                 self.pending.push(Command::Encrypted {
                     to: asker,
                     call: ask,
-                    outcome: Outcome::Done(EncryptedChange {
+                    outcome: Outcome::Done(Sealed {
                         token: call,
                         ciphertext: prepared.ciphertext,
+                        epoch,
                     }),
                 });
             }
@@ -90,7 +99,8 @@ impl KeyhiveBoundary {
         });
     }
 
-    /// A [`Command::ApplyEncrypt`] ended. It reports `Done` or `StoreFailed`.
+    /// A [`Command::ApplyEncrypt`] ended. It reports `Done`, `Refused` (a locked operation ran
+    /// since the commit, so the preparation is stale) or `StoreFailed`.
     pub fn applied(&mut self, call: CallId, ended: Ended<()>) {
         if self.trapped {
             return;
@@ -104,18 +114,24 @@ impl KeyhiveBoundary {
             })
             .expect("an answer to an apply in flight");
         match ended {
-            Ended::Done(()) => {
+            Ended::Done(()) | Ended::Refused => {
                 let Some(Token {
+                    doc,
                     state: TokenState::Applying { events, .. },
                     ..
                 }) = self.tokens.remove(&token)
                 else {
                     unreachable!("found above");
                 };
+                if ended == Ended::Refused && self.docs.contains_key(&doc) {
+                    // keyhive's memory is stale for this document: reload it from the rows
+                    self.evict_wanted.insert(doc);
+                }
+                // the commit landed either way, so its events are durable
                 self.publish(events.into_iter().map(|event| (event, None)));
             }
             Ended::StoreFailed => self.trap(Step::Apply),
-            Ended::Refused | Ended::Cancelled => panic!("an apply is not refused or cancelled"),
+            Ended::Cancelled => panic!("an apply is not cancelled"),
         }
     }
 
@@ -248,12 +264,24 @@ impl KeyhiveBoundary {
         assert!(matches!(active.phase, Phase::Reopening(c) if c == call));
         match ended {
             Ended::Done(()) => {
-                // a new instance holds nothing, and no preparation survives: the lock waited
-                // for them all
-                assert!(
-                    self.tokens.is_empty(),
-                    "nothing prepared across a locked operation"
-                );
+                // a new instance holds nothing: the preparations made on the old one are lost.
+                // None is in flight (the lock waited for the calls), but settled ones waiting
+                // to be applied are dropped here, their events being durable.
+                let mut told = vec![];
+                self.tokens.retain(|_, token| match &mut token.state {
+                    TokenState::Prepared { .. } => {
+                        token.lost = true;
+                        true
+                    }
+                    TokenState::ApplyWanted { events } => {
+                        told.extend(std::mem::take(events));
+                        false
+                    }
+                    TokenState::Encrypting { .. } | TokenState::Applying { .. } => {
+                        panic!("a keyhive call is out across a locked operation")
+                    }
+                });
+                self.publish(told.into_iter().map(|event| (event, None)));
                 self.docs.clear();
                 self.evict_wanted.clear();
                 self.finish_refused();

@@ -32,8 +32,12 @@ pub(super) struct Oracle {
     hydrating: BTreeSet<DocId>,
     /// Preparations holding the shared lock, with their document.
     enc: BTreeMap<u64, DocId>,
-    /// Decryptions out, with their document: they hold the shared lock while out.
+    /// Keyhive calls out (encrypt, decrypt, apply) with their document: they hold the shared
+    /// lock while out, and nothing else does.
     dec: BTreeMap<u64, DocId>,
+    /// Preparations settled as applied, whose apply has not been issued.
+    apply_pending: BTreeSet<u64>,
+    token_epoch: BTreeMap<u64, u64>,
     token_events: BTreeMap<u64, Vec<EventId>>,
     landed: BTreeSet<u64>,
     connected: BTreeSet<SessionId>,
@@ -60,6 +64,8 @@ impl Oracle {
             hydrating: BTreeSet::new(),
             enc: BTreeMap::new(),
             dec: BTreeMap::new(),
+            apply_pending: BTreeSet::new(),
+            token_epoch: BTreeMap::new(),
             token_events: BTreeMap::new(),
             landed: BTreeSet::new(),
             connected: BTreeSet::new(),
@@ -121,7 +127,7 @@ impl Oracle {
                     self.loaded.contains(doc),
                     "an encryption on document {doc} that was not hydrated (law 5)"
                 );
-                self.enc.insert(*call, *doc);
+                self.dec.insert(*call, *doc);
             }
             Command::Decrypt { call, doc, .. } => {
                 keyhive_call(self, "a decryption");
@@ -131,22 +137,27 @@ impl Oracle {
                 );
                 self.dec.insert(*call, *doc);
             }
-            Command::ApplyEncrypt { token, .. } => {
+            Command::ApplyEncrypt { call, token } => {
                 keyhive_call(self, "an apply");
                 assert!(
                     self.landed.contains(token),
                     "preparation {token} is applied though its commit did not land (law 1)"
                 );
-                let doc = self.enc.get(token).expect("a preparation held");
                 assert!(
-                    self.loaded.contains(doc),
+                    self.apply_pending.remove(token),
+                    "preparation {token} is applied though it was not settled as applied, or its instance was reopened (law 1)"
+                );
+                let doc = self.enc.remove(token).expect("a preparation held");
+                assert!(
+                    self.loaded.contains(&doc),
                     "an apply on document {doc} that is not loaded (law 5)"
                 );
+                self.dec.insert(*call, doc);
             }
             Command::DropEncrypt { token } => {
                 assert!(
                     self.enc.remove(token).is_some(),
-                    "a preparation held is dropped"
+                    "a preparation held (and not lost to a reopen) is dropped"
                 );
             }
             Command::Evict { doc } => {
@@ -160,8 +171,8 @@ impl Oracle {
             Command::AcquireLock { .. } => {
                 assert!(!self.exclusive, "a lock taken twice");
                 assert!(
-                    self.enc.is_empty() && self.dec.is_empty() && self.hydrating.is_empty(),
-                    "the lock is taken exclusively with encryptions, decryptions or hydrations in flight (law 3)"
+                    self.dec.is_empty() && self.hydrating.is_empty(),
+                    "the lock is taken exclusively with a keyhive call in flight (law 3)"
                 );
                 self.exclusive = true;
             }
@@ -210,28 +221,7 @@ impl Oracle {
                     "a query for a closed session"
                 );
             }
-            Command::Notify { session, events } => {
-                assert!(
-                    self.connected.contains(session),
-                    "session {session} is notified though it is not connected (law 4)"
-                );
-                let granted = self.granted.get(session).cloned().unwrap_or_default();
-                for event in events {
-                    assert!(
-                        granted.contains(event),
-                        "session {session} is told of event {event}, which Keyline did not grant it (law 4)"
-                    );
-                    assert!(
-                        self.source[event] != Some(*session),
-                        "event {event} is sent back to its source, session {session} (law 4)"
-                    );
-                    assert!(
-                        self.delivered.insert((*session, *event)),
-                        "event {event} reaches session {session} twice (law 4)"
-                    );
-                    self.owed.remove(&(*session, *event));
-                }
-            }
+            Command::Notify { session, events } => self.on_notify(*session, events),
             Command::Reply { ticket, result } => {
                 assert_eq!(
                     result.is_ok(),
@@ -240,7 +230,41 @@ impl Oracle {
                 );
             }
             Command::Trap { .. } => self.trapped = true,
+            Command::Encrypted {
+                outcome: Outcome::Done(sealed),
+                ..
+            } => {
+                assert_eq!(
+                    self.token_epoch.get(&sealed.token),
+                    Some(&sealed.epoch),
+                    "the answer carries the epoch the encryption was made under (law 9)"
+                );
+            }
             Command::Cancel { .. } | Command::Encrypted { .. } | Command::Decrypted { .. } => {}
+        }
+    }
+
+    /// A notification: to a connected session, of events Keyline granted it, never its own, once.
+    fn on_notify(&mut self, session: SessionId, events: &[EventId]) {
+        assert!(
+            self.connected.contains(&session),
+            "session {session} is notified though it is not connected (law 4)"
+        );
+        let granted = self.granted.get(&session).cloned().unwrap_or_default();
+        for event in events {
+            assert!(
+                granted.contains(event),
+                "session {session} is told of event {event}, which Keyline did not grant it (law 4)"
+            );
+            assert!(
+                self.source[event] != Some(session),
+                "event {event} is sent back to its source, session {session} (law 4)"
+            );
+            assert!(
+                self.delivered.insert((session, *event)),
+                "event {event} reaches session {session} twice (law 4)"
+            );
+            self.owed.remove(&(session, *event));
         }
     }
 
@@ -254,26 +278,40 @@ impl Oracle {
     }
 
     pub fn encrypted(&mut self, call: u64, ended: &Ended<Prepared>) {
-        match ended {
-            Ended::Done(prepared) => {
-                self.token_events.insert(call, prepared.events.clone());
-            }
-            Ended::Refused => {
-                self.enc.remove(&call);
-            }
-            _ => {}
+        let doc = self.dec.remove(&call).expect("an encryption in flight");
+        if let Ended::Done(prepared) = ended {
+            self.enc.insert(call, doc);
+            self.token_events.insert(call, prepared.events.clone());
+            self.token_epoch.insert(call, prepared.epoch);
         }
+    }
+
+    /// The asker settled a preparation. A token not held any more was lost to a reopen, and is
+    /// not applied, though its commit landed and its events are durable.
+    pub fn settled(&mut self, token: u64, applied: bool) {
+        if applied {
+            if self.enc.contains_key(&token) {
+                self.apply_pending.insert(token);
+            } else {
+                self.commit_token(token);
+            }
+        }
+    }
+
+    fn commit_token(&mut self, token: u64) {
+        let events = self.token_events.remove(&token).unwrap_or_default();
+        self.commit_events(events.into_iter().map(|e| (e, None)).collect());
     }
 
     pub fn decrypted(&mut self, call: u64, _ended: &Ended<Vec<u8>>) {
         self.dec.remove(&call);
     }
 
-    pub fn applied(&mut self, token: u64, ended: &Ended<()>) {
-        if *ended == Ended::Done(()) {
-            self.enc.remove(&token);
-            let events = self.token_events.remove(&token).unwrap_or_default();
-            self.commit_events(events.into_iter().map(|e| (e, None)).collect());
+    pub fn applied(&mut self, call: u64, token: u64, ended: &Ended<()>) {
+        self.dec.remove(&call);
+        // a stale apply is refused, and the change is durable all the same
+        if matches!(ended, Ended::Done(()) | Ended::Refused) {
+            self.commit_token(token);
         }
     }
 
@@ -336,6 +374,11 @@ impl Oracle {
         if *ended == Ended::Done(()) {
             self.loaded.clear();
             self.dirty = false;
+            // the new instance holds none of the preparations: settled ones are not applied
+            for token in std::mem::take(&mut self.apply_pending) {
+                self.commit_token(token);
+            }
+            self.enc.clear();
         }
     }
 
@@ -384,7 +427,12 @@ impl Oracle {
             !self.exclusive && !self.tx_open && !self.dirty,
             "a drain ends outside a locked operation"
         );
-        assert!(self.enc.is_empty() && self.dec.is_empty() && self.hydrating.is_empty());
+        assert!(
+            self.enc.is_empty()
+                && self.dec.is_empty()
+                && self.apply_pending.is_empty()
+                && self.hydrating.is_empty()
+        );
         assert_eq!(
             replies.len() as u64,
             tickets,
