@@ -4,6 +4,7 @@ use crate::index::DatumRefStore;
 use automerge::transaction::Transactable;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::BranchPath;
+use big_cabinet_core::dpath::DpathClaim;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
@@ -1253,9 +1254,14 @@ async fn backfill_records_a_tag_only_once_every_stored_document_was_readable() {
         .backfill_reference_tags(&repo, NonZeroUsize::new(2).unwrap())
         .await
         .unwrap();
-    // The repo also always knows the core `BranchPath` datum, whose `from` position declares a
-    // reference: it has no stored entries here, so it is trivially complete and seen too.
-    let mut expected = [NOTE.to_owned(), BranchPath::ID.to_owned()];
+    // The repo also always knows the core `BranchPath` and `DpathClaim` datums, whose `from` and
+    // `targets` positions declare references: they have no stored entries here, so they are
+    // trivially complete and seen too.
+    let mut expected = [
+        NOTE.to_owned(),
+        BranchPath::ID.to_owned(),
+        DpathClaim::ID.to_owned(),
+    ];
     expected.sort();
     let mut seen = queries::ref_tags(&sql).await.unwrap();
     seen.sort();
