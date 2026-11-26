@@ -1,5 +1,7 @@
-//! Building blocks the machines are made of: task scheduling and watermarks. Nothing here knows
-//! about parts, peers or replay.
+//! Building blocks the machines are made of and driven by: the shared driver skeleton
+//! ([`calls`]), task scheduling and watermarks. Nothing here knows about parts, peers or replay.
+
+pub mod calls;
 
 // The durable outbox queues, replaces, cancels and reaps tasks through the keyed scheduler, but
 // nothing yet retries a failed task, parks a key or ticks delayed tasks through it: its own

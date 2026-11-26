@@ -2,14 +2,9 @@
 
 use crate::interlude::*;
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use futures::FutureExt;
-use futures::StreamExt;
-use futures::future::AbortHandle;
-use futures::future::abortable;
-use futures::stream::FuturesUnordered;
 
 use super::Fact;
 use super::Facts;
@@ -18,6 +13,9 @@ use super::SyncBackend;
 use crate::AllowedStrat;
 use crate::Clock;
 use crate::fingerprint::FingerprintSeed;
+use crate::kit::calls::Aborts;
+use crate::kit::calls::Event;
+use crate::kit::calls::Pool;
 use crate::part_store::PartStoreRead;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::replay::server::MAX_HOLD;
@@ -285,15 +283,7 @@ struct Env<C, B, S> {
 struct Conn<C, B, S> {
     sync: PeerSync,
     env: Arc<Env<C, B, S>>,
-    aborts: BTreeMap<CallId, AbortHandle>,
-}
-
-enum Event<C> {
-    Input(Option<Input<C>>),
-    Done(CallId, Done),
-    /// A best-effort close of a replaced session ended.
-    Closed,
-    Timer,
+    aborts: Aborts<CallId>,
 }
 
 struct Driver<C, B, K, S> {
@@ -323,8 +313,8 @@ where
     /// closes of replaced sessions. Both are locals so that their future types are inferred
     /// rather than boxed (a boxed `dyn Future` would be `!Send` and so would this loop).
     async fn run(mut self, inputs: async_channel::Receiver<Input<C>>) {
-        let mut calls = FuturesUnordered::new();
-        let mut closes = FuturesUnordered::new();
+        let mut calls = Pool::default();
+        let mut closes = Pool::default();
         loop {
             // Outcomes that arrive while a cursor write is awaited are fed at its end, and the
             // machine is owed a flush after them (law 4), so flush until a flush persists nothing.
@@ -336,7 +326,10 @@ where
                 }
                 self.persist(persists, &mut calls).await;
             }
-            match self.next_event(&inputs, &mut calls, &mut closes).await {
+            let now = (self.clock)();
+            let due = self.conn.as_ref().and_then(|conn| conn.sync.next_due());
+            // the closes' arm is the driver's own (law 4 orders it after inputs)
+            match calls.wait(&inputs, closes.next(), now, due).await {
                 Event::Input(Some(Input::Routes(update, applied))) => {
                     self.update_routes(update).await;
                     // the caller may have stopped waiting: the update stands either way
@@ -353,59 +346,13 @@ where
                 }
                 // every handle dropped
                 Event::Input(None) => break,
-                Event::Done(call, done) => self.feed(call, done),
-                Event::Closed | Event::Timer => {}
+                Event::Done((call, done)) => self.feed(call, done),
+                Event::Extra(()) | Event::Timer => {}
             }
         }
         self.disconnect();
         for part in std::mem::take(&mut self.routes.parts) {
             self.facts.publish(&self.config.peer, &part, Fact::Removed);
-        }
-    }
-
-    /// The first of: a call's outcome, an input, the machine's `next_due` (law 4).
-    async fn next_event<Call, Close>(
-        &mut self,
-        inputs: &async_channel::Receiver<Input<C>>,
-        calls: &mut FuturesUnordered<Call>,
-        closes: &mut FuturesUnordered<Close>,
-    ) -> Event<C>
-    where
-        Call: Future<Output = (CallId, Done)>,
-        Close: Future<Output = ()>,
-    {
-        let now = (self.clock)();
-        let due = self.conn.as_ref().and_then(|conn| conn.sync.next_due());
-        let call = async {
-            if calls.is_empty() {
-                std::future::pending().await
-            } else {
-                calls.next().await.expect("a non-empty set yields")
-            }
-        }
-        .fuse();
-        let close = async {
-            if closes.is_empty() {
-                std::future::pending().await
-            } else {
-                closes.next().await.expect("a non-empty set yields")
-            }
-        }
-        .fuse();
-        let input = inputs.recv().fuse();
-        let timer = async {
-            match due {
-                Some(at) => n0_future::time::sleep(at.saturating_duration_since(now)).await,
-                None => std::future::pending().await,
-            }
-        }
-        .fuse();
-        futures::pin_mut!(call, close, input, timer);
-        futures::select_biased! {
-            (call, done) = call => Event::Done(call, done),
-            input = input => Event::Input(input.ok()),
-            () = close => Event::Closed,
-            () = timer => Event::Timer,
         }
     }
 
@@ -519,7 +466,7 @@ where
             let PeerCommand::Cancel { call } = cmd else {
                 unreachable!("a disconnect only cancels: {cmd:?}");
             };
-            aborts[&call].abort();
+            aborts.cancel(&call);
         }
         for part in &self.routes.parts {
             self.facts.publish(&self.config.peer, part, Fact::Unsynced);
@@ -529,9 +476,7 @@ where
     /// Law 2: an outcome goes to the machine once, by the input that names its kind.
     fn feed(&mut self, call: CallId, done: Done) {
         let conn = self.conn.as_mut().expect("calls live in a connection");
-        conn.aborts
-            .remove(&call)
-            .expect("a call's outcome is reported once");
+        conn.aborts.finish(&call);
         let sync = &mut conn.sync;
         tracing::debug!(target: "instr", call = ?call, "done");
         match done {
@@ -575,7 +520,7 @@ where
         for cmd in cmds {
             tracing::debug!(target: "instr", ?cmd, "issue");
             match cmd {
-                PeerCommand::Cancel { call } => conn.aborts[&call].abort(),
+                PeerCommand::Cancel { call } => conn.aborts.cancel(&call),
                 PeerCommand::PersistCursor { part, cursor } => persists.push((part, cursor)),
                 PeerCommand::Restarted {
                     part,
@@ -607,9 +552,10 @@ where
                 call => {
                     let id = call_id(&call);
                     let aborted = Done::aborted(&call);
-                    let (task, handle) = abortable(run_call(Arc::clone(&conn.env), call));
-                    conn.aborts.insert(id, handle);
-                    issued.push(async move { (id, task.await.unwrap_or(aborted)) });
+                    let task =
+                        conn.aborts
+                            .track(id, run_call(Arc::clone(&conn.env), call), aborted);
+                    issued.push(async move { (id, task.await) });
                 }
             }
         }
@@ -624,11 +570,8 @@ where
     /// a backend that shares a SQLite file with the cursor table is in a transaction, holding
     /// the file's one writer lease, between two of its statements. Waiting for the write alone
     /// would then wait on a call that is never polled to release it.
-    async fn persist<Call>(
-        &mut self,
-        persists: Vec<(PartKey, PeerCursor)>,
-        calls: &mut FuturesUnordered<Call>,
-    ) where
+    async fn persist<Call>(&mut self, persists: Vec<(PartKey, PeerCursor)>, calls: &mut Pool<Call>)
+    where
         Call: Future<Output = (CallId, Done)>,
     {
         if persists.is_empty() {
@@ -642,14 +585,7 @@ where
                 .fuse();
             futures::pin_mut!(write);
             loop {
-                let call = async {
-                    if calls.is_empty() {
-                        std::future::pending().await
-                    } else {
-                        calls.next().await.expect("a non-empty set yields")
-                    }
-                }
-                .fuse();
+                let call = calls.next().fuse();
                 futures::pin_mut!(call);
                 futures::select_biased! {
                     written = write => {
