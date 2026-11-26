@@ -9,6 +9,7 @@
 //! than the revisions `big_repo` is pinned to; the two coexist in one workspace until `big_repo`
 //! is retired.
 
+pub mod coordinator;
 pub mod document;
 pub mod sedimentree;
 
