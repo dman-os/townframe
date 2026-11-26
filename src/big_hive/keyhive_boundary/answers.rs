@@ -57,7 +57,7 @@ impl KeyhiveBoundary {
                 self.pending.push(Command::Encrypted {
                     to: asker,
                     call: ask,
-                    outcome: Outcome::Done(Sealed {
+                    outcome: Outcome::Done(EncryptedChange {
                         token: call,
                         ciphertext: prepared.ciphertext,
                         epoch,

@@ -29,10 +29,10 @@
 //! `Hydrate`) and nothing longer: a prepared encryption waiting for its commit holds no lock,
 //! so a membership change does not wait for plans to commit. Safety is validated at the commit
 //! instead (optimistic concurrency). [`Command::Encrypted`] carries the document's key epoch
-//! the encryption was made under ([`Sealed::epoch`]), a per-document CGKA version that the store
-//! bumps whenever a CGKA op for the document is appended. The commit executor checks each plan
-//! document's epoch against it, and a plan whose epoch has moved fails as stale and is prepared
-//! again. That is what keeps a key prepared before a removal from landing after it. Apply
+//! the encryption was made under ([`EncryptedChange::epoch`]), a per-document CGKA version that
+//! the store bumps whenever a CGKA op for the document is appended. The epoch flows into the
+//! plan's `if_epoch`, the commit executor checks each plan document's epoch against it, and a
+//! plan whose epoch has moved fails as stale and is prepared again. That is what keeps a key prepared before a removal from landing after it. Apply
 //! happens after the commit, so a locked operation may have run in between: then the apply is
 //! refused as stale and the document is evicted, so keyhive reloads it from the rows. If the
 //! instance was reopened in between, the preparation is gone with it and nothing is applied.
@@ -150,6 +150,8 @@ use std::time::Duration;
 
 use crate::coordinator::DocId;
 use crate::document::CallId;
+use crate::document::EncryptedChange;
+use crate::document::Epoch;
 use crate::document::Instant;
 use crate::document::Outcome;
 use crate::document::Ticket;
@@ -222,19 +224,6 @@ pub struct Prepared {
     pub ciphertext: Vec<u8>,
     pub events: Vec<EventId>,
     /// The document's key epoch the encryption was made under.
-    pub epoch: Epoch,
-}
-
-/// A document's key epoch: a per-document CGKA version, bumped by the store whenever a CGKA op
-/// for the document is appended.
-pub type Epoch = u64;
-
-/// An encryption as the asker sees it, not yet applied: `token` names the preparation for
-/// [`KeyhiveBoundary::settle_encrypt`], and `epoch` is what the commit executor validates.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sealed {
-    pub token: u64,
-    pub ciphertext: Vec<u8>,
     pub epoch: Epoch,
 }
 
@@ -336,7 +325,7 @@ pub enum Command {
     Encrypted {
         to: Asker,
         call: CallId,
-        outcome: Outcome<Sealed>,
+        outcome: Outcome<EncryptedChange>,
     },
     /// The answer to a [`KeyhiveBoundary::decrypt`].
     Decrypted {
