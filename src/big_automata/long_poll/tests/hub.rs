@@ -4,7 +4,7 @@
 use std::pin::pin;
 
 use super::*;
-use crate::Clock;
+use crate::kit::Clock;
 
 fn hub() -> LongPollHub<u8> {
     let clock: Clock = Arc::new(|| tokio::time::Instant::now().into_std());

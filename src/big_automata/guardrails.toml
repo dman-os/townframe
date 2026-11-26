@@ -4,6 +4,11 @@ dependency_reason = "The sans-io sync machines and their store contracts build o
 allowed_dependencies = ["method_core", "service_core_rs", "utils_rs"]
 allow_external_api_types = false
 
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = ["automerge"]
+
 [builds.native]
 features = ["automerge", "test-support"]
 required_features = []

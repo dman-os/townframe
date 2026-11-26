@@ -5,7 +5,7 @@
 use std::sync::LazyLock;
 
 use super::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 
 mod bench;
 mod differential;

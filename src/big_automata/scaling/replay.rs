@@ -8,7 +8,7 @@ use utils_rs::testing::alloc_count::measure;
 
 use super::assert_linear;
 use crate::interlude::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::part_store::AccessLevel;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::laws::principal;

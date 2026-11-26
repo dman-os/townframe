@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::AllowedStrat;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::part_store::Generation;
 use crate::part_store::PartSummary;
 use crate::part_store::bucket_summary::BucketSummary;

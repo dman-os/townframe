@@ -63,7 +63,7 @@ use crate::interlude::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::replay::client::ReplayClient;
 use crate::replay::client::TargetOutcome;
 use crate::replay::wire::PageSession;

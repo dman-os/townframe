@@ -53,7 +53,7 @@ use futures::future::AbortHandle;
 use futures::future::Abortable;
 use futures::stream::FuturesUnordered;
 
-use super::scheduler::Instant;
+use super::Instant;
 
 /// What [`Pool::wait`] woke for.
 #[derive(Debug)]

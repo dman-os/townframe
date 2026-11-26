@@ -2,7 +2,7 @@
 //! recomputes each one's due time from what it was told. The differential tests hold
 //! [`LongPoll`](super::LongPoll) to it.
 
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::rev::Rev;
 
 use super::Linger;

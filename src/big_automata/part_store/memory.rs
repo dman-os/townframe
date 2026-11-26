@@ -11,8 +11,8 @@
 
 use tokio::sync::watch;
 
-use crate::Clock;
 use crate::interlude::*;
+use crate::kit::Clock;
 use crate::long_poll::LongPollHub;
 use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
@@ -101,7 +101,7 @@ impl Default for MemoryPartStore {
     /// A new, empty store with a freshly minted generation, whose long-polls run on the wall
     /// clock.
     fn default() -> Self {
-        Self::build(None, Arc::new(crate::kit::scheduler::Instant::now))
+        Self::build(None, Arc::new(crate::kit::Instant::now))
     }
 }
 
@@ -135,7 +135,7 @@ impl MemoryPartStore {
     /// store of one simulated peer shares. For deterministic simulations; a real store mints
     /// random generations ([`Default`]).
     pub fn deterministic(mints: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        Self::build(Some(mints), Arc::new(crate::kit::scheduler::Instant::now))
+        Self::build(Some(mints), Arc::new(crate::kit::Instant::now))
     }
 
     fn build(mints: Option<Arc<std::sync::atomic::AtomicU64>>, clock: Clock) -> Self {

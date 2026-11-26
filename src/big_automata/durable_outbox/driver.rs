@@ -24,8 +24,8 @@ use std::num::NonZeroUsize;
 
 use futures::future::Either;
 
-use crate::Clock;
 use crate::interlude::*;
+use crate::kit::Clock;
 use crate::kit::calls::Aborts;
 use crate::kit::calls::Event;
 use crate::kit::calls::Pool;

@@ -14,7 +14,6 @@ use std::sync::atomic::Ordering;
 
 use futures::future::Either;
 
-use crate::Clock;
 use crate::driver::DriverConfig;
 use crate::driver::Facts;
 use crate::driver::PeerDriver;
@@ -22,7 +21,8 @@ use crate::driver::RouteUpdate;
 use crate::driver::memory::MemoryBackend;
 use crate::driver::memory::MemoryPeerCursors;
 use crate::interlude::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Clock;
+use crate::kit::Instant;
 use crate::part_store::AccessLevel;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreWrite;

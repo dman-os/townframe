@@ -37,7 +37,3 @@ pub enum AllowedStrat {
     #[default]
     CursorAndBucket,
 }
-
-/// The driver's injected clock; the machine never reads time itself. Its instant is the
-/// web-safe `kit::scheduler::Instant`.
-pub type Clock = std::sync::Arc<dyn Fn() -> kit::scheduler::Instant + Send + Sync>;
