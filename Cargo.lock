@@ -1813,6 +1813,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "utils_rs",
+ "web-time",
 ]
 
 [[package]]

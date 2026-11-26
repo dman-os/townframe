@@ -33,6 +33,7 @@ future_form.workspace = true
 thiserror.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+web-time.workspace = true
 
 # The browser backend of each getrandom major in the graph is a feature that only the final build
 # can turn on: 0.2 (keyhive's rand 0.8) `js`, 0.3 and 0.4 `wasm_js`. Without them the crate does

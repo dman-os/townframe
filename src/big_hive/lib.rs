@@ -9,6 +9,7 @@
 //! than the revisions `big_repo` is pinned to; the two coexist in one workspace until `big_repo`
 //! is retired.
 
+pub mod document;
 pub mod sedimentree;
 
 mod sqlite {
@@ -23,7 +24,6 @@ pub use sqlite::queries::MIGRATION_TABLE;
 pub use sqlite::queries::MIGRATIONS;
 
 // Declared for the lanes that build on this skeleton; nothing here calls them yet.
-use automerge as _;
 use subduction_keyhive as _;
 
 // Compile-time proof that the SQLite Keyline backend satisfies the fork's `Keyline` bound: the
