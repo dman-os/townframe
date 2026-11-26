@@ -94,6 +94,27 @@ Violations to chase:
 - Ready but not a green cut point: #47, #52, #54–#62 (no CI recorded), #85 and #117 (red), #216 (CI-only tip; should be a draft).
 - Candidates to close (ask the operator): #50 (sketch/willow, 2026-09), #52 (likely superseded by #55–#62), #47 (dpaths, 2026-10), #85 (premise "land ahead of #84" is gone). #173 is subsumed by #151 (node-32 carries the same test fix): close it once #151 lands.
 
+## Handoff (2026-11-26 night)
+
+- **main = fff2be53.** Landed today:
+  - #105–#199;
+  - #423 mbx 1.31.0;
+  - #422 iroh-blobs 0.104.1;
+  - #384–#386.
+- **Next review: node #233–#252** (stack #408), because it unblocks intxt #321 and claytxt #344.
+- **Drafts of ours waiting on review:**
+  - #395: ADR 056, ledgers;
+  - #413: review follow-ups;
+  - #418: the stale-ciphertext fix. Its hang test needs the 0.104 pin, which reaches it when its section rebases.
+  - #431: the drawer-membership lost-wakeup fix, verified by claytxt (0/14 hung, against 6/20 before).
+  - stack/node-108-dpath: the Dpath type and the dpath datum. Its lane may still be finishing; see its PR.
+- **Next build:**
+  - `day import` on top of node-108 (the plan is in the nodule ledger);
+  - root-cause two big_node failures that also fail on base node-97: `an_installed_cartridge_is_ready_after_a_restart_with_its_settings_intact` and `disk_reopen_recovers_identity_drawers_documents_commands_and_index_cursor`.
+- **With other lanes:**
+  - automata: the x-nodule header move (cut A, a `nodule_wire` crate) after the critical path; keyline/big_repo is next in its order.
+  - claytxt: mbx's live-target gc and rmeta faults are still open upstream.
+
 ## Open questions for the operator
 
 - The empty duplicate commit b36cfc3d on main: leave it (harmless) or rewrite main?
