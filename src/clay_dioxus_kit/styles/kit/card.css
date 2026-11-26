@@ -30,7 +30,8 @@
   background: transparent;
 }
 
-/* A well that holds other content. */
+/* A well that holds other content, one step below the surface it sits in: it goes inside a tonal
+   card or a panel and never directly on the canvas (ADR 057 section 3). */
 .ct-card[data-variant="sunken"] {
   background: var(--ct-color-surface-sunken);
 }

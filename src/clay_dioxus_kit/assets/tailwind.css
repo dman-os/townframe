@@ -900,9 +900,9 @@
     --ct-palette-accent-contrast: light-dark(#ffffff, #2d2f42);
     --ct-palette-danger-1: light-dark(#fbf0ef, #2e0f0c);
     --ct-palette-danger-2: light-dark(#fae9e7, #471512);
-    --ct-palette-danger-3: light-dark(#ffdad6, #93000a);
-    --ct-palette-danger-4: light-dark(#f7bdb7, #a62f29);
-    --ct-palette-danger-5: light-dark(#eda199, #b94c43);
+    --ct-palette-danger-3: light-dark(#ffdad6, #3a1d1b);
+    --ct-palette-danger-4: light-dark(#f7bdb7, #4a2623);
+    --ct-palette-danger-5: light-dark(#eda199, #5c302c);
     --ct-palette-danger-6: light-dark(#e2847b, #cb665d);
     --ct-palette-danger-7: light-dark(#d6665d, #dd8076);
     --ct-palette-danger-8: light-dark(#c9463e, #ee9a90);
@@ -913,9 +913,9 @@
     --ct-palette-danger-contrast: light-dark(#ffffff, #690005);
     --ct-palette-success-1: light-dark(#f0f8f2, #051108);
     --ct-palette-success-2: light-dark(#e8f4eb, #0c2012);
-    --ct-palette-success-3: light-dark(#d3efdb, #0f4a27);
-    --ct-palette-success-4: light-dark(#b6dbc0, #175b32);
-    --ct-palette-success-5: light-dark(#99c7a5, #206c3d);
+    --ct-palette-success-3: light-dark(#d3efdb, #17301f);
+    --ct-palette-success-4: light-dark(#b6dbc0, #1e3b28);
+    --ct-palette-success-5: light-dark(#99c7a5, #264832);
     --ct-palette-success-6: light-dark(#7cb48b, #297d48);
     --ct-palette-success-7: light-dark(#60a071, #329053);
     --ct-palette-success-8: light-dark(#428d57, #3ba25f);
@@ -926,9 +926,9 @@
     --ct-palette-success-contrast: light-dark(#ffffff, #1f1f29);
     --ct-palette-warning-1: light-dark(#fff8ec, #170f05);
     --ct-palette-warning-2: light-dark(#fef3e0, #281c0a);
-    --ct-palette-warning-3: light-dark(#ffe7bd, #5a3a00);
-    --ct-palette-warning-4: light-dark(#fddda8, #724b03);
-    --ct-palette-warning-5: light-dark(#fbd392, #8a5c08);
+    --ct-palette-warning-3: light-dark(#ffe7bd, #372c14);
+    --ct-palette-warning-4: light-dark(#fddda8, #45371b);
+    --ct-palette-warning-5: light-dark(#fbd392, #554324);
     --ct-palette-warning-6: light-dark(#f9c87c, #a46e0f);
     --ct-palette-warning-7: light-dark(#f8bd64, #be8016);
     --ct-palette-warning-8: light-dark(#f6b249, #d9931d);
@@ -1036,6 +1036,7 @@
     --ct-alert-radius: var(--ct-dimension-radius-md);
     --ct-button-radius: var(--ct-dimension-radius-md);
     --ct-chip-radius: var(--ct-dimension-radius-pill);
+    --ct-chip-status-radius: var(--ct-dimension-radius-sm);
     --ct-sheet-radius: var(--ct-dimension-radius-xl);
     --ct-drawer-radius: 0;
     --ct-list-row-radius: var(--ct-dimension-radius-md);
@@ -1448,7 +1449,7 @@
     padding-inline: var(--ct-dimension-spacing-3);
     border: var(--ct-chip-border);
     border-radius: var(--ct-chip-radius);
-    background: var(--ct-color-surface-sunken);
+    background: var(--ct-color-surface-raised);
     color: var(--ct-color-text);
     font-family: var(--ct-font-family);
     font-size: var(--ct-dimension-font-size-sm);
@@ -1458,6 +1459,7 @@
   }
   .ct-chip[data-status] {
     --ct-chip-glyph: "i";
+    border-radius: var(--ct-chip-status-radius);
     background: var(--ct-chip-container);
     color: var(--ct-chip-on-container);
   }
