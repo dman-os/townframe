@@ -36,6 +36,11 @@ impl CertificateRow {
     /// Variables a row binds.
     pub const WIDTH: usize = 10;
 
+    /// The certificate frame this row stores.
+    pub fn signed(&self) -> &[u8] {
+        &self.signed
+    }
+
     pub fn of<W: Encode>(cert: &VerifiedCertificate<W>) -> Self {
         let (kind, digest) = kind_and_digest(cert.id());
         let issuer = cert.issuer().to_bytes().to_vec();

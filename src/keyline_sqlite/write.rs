@@ -18,17 +18,17 @@ const MAX_PARAMS: usize = 30_000;
 /// reads through that transaction until it commits.
 ///
 /// Hand it to [`SqliteKeyline::committed`](crate::SqliteKeyline::committed) after the
-/// transaction commits, so the backend's cache follows the tables. Drop it after a rollback:
-/// nothing outside the transaction ever saw the batch, and the cache never held it.
+/// transaction commits, so the backend's verification memo knows the batch. Drop it after a rollback:
+/// nothing outside the transaction ever saw the batch.
 #[must_use = "pass it to `SqliteKeyline::committed` once the transaction commits, or drop it after a rollback"]
 pub struct Staged<W> {
     /// The version the transaction read before it inserted.
     pub(crate) base: i64,
     /// The version after the insert: `base`, or one more if the batch added a certificate.
     pub(crate) version: i64,
-    /// The batch, if it added anything; some of it may have been in the set already, which the
-    /// cache's own insert ignores.
-    pub(crate) added: Vec<VerifiedCertificate<W>>,
+    /// The batch with the bytes written for each, if it added anything; some of it may have been in
+    /// the set already. Handed to the verification memo once the transaction commits.
+    pub(crate) warm: Vec<(Vec<u8>, VerifiedCertificate<W>)>,
 }
 
 impl<W> Staged<W> {
@@ -54,6 +54,7 @@ pub async fn insert_in<W: Encode>(
 ) -> Result<Staged<W>, Error> {
     let base = queries::meta_version(tx).await?;
     let mut inserted = 0;
+    let mut warm = Vec::with_capacity(batch.len());
     for chunk in batch.chunks(MAX_PARAMS / CertificateRow::WIDTH) {
         let mut sql = Sql::new(
             "INSERT OR IGNORE INTO keyline_certificates\n     ( kind\n     , digest\n     , issuer\n     , audience\n     , subject\n     , power\n     , citation\n     , revoke\n     , retain\n     , signed\n     )\nVALUES ",
@@ -62,7 +63,9 @@ pub async fn insert_in<W: Encode>(
             if index != 0 {
                 sql.push(", ");
             }
-            sqlite_rs::BindTuple::bind_tuple(CertificateRow::of(cert), &mut sql);
+            let row = CertificateRow::of(cert);
+            warm.push((row.signed().to_vec(), cert.clone()));
+            sqlite_rs::BindTuple::bind_tuple(row, &mut sql);
         }
         inserted += sql.execute(tx).await?.rows_affected;
     }
@@ -70,13 +73,13 @@ pub async fn insert_in<W: Encode>(
         return Ok(Staged {
             base,
             version: base,
-            added: Vec::new(),
+            warm: Vec::new(),
         });
     }
     queries::bump_version(tx).await?;
     Ok(Staged {
         base,
         version: base + 1,
-        added: batch,
+        warm,
     })
 }

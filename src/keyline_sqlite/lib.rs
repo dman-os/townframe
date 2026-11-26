@@ -9,23 +9,22 @@
 //!   copied beside the signed bytes; `keyline_meta` holds the version. The set-shaped queries
 //!   (`contains`, `get`, `certificates`, `revocations_of`, `delegations_to`, `subjects`,
 //!   `digest`) are SQL, each served by an index (`suite/plans.rs` checks it).
-//! - **The evaluation is cached in memory, keyed by version.** The stratified evaluation
-//!   (positive reach, admin reach and coverage, then the live set and edge caps, both with
-//!   nested fixed points over per-revocation exclusion contexts) is `keyline_memory::State`'s,
-//!   rebuilt from the rows when a query's snapshot reads a version the cache is not at, and
-//!   carried forward by each commit this handle makes. It is not recursive CTEs: stratum 1's
-//!   member-inheritance rule is non-linear recursion (a node's reach is composed from other
-//!   nodes' reach), which SQLite's single-reference recursive CTEs cannot express, and stratum
-//!   2's exclusion contexts need a search per distinct revoker set inside a fixed point. A
-//!   Rust-driven fixpoint over temp tables is possible and is the next step if a relay needs
-//!   evaluation without holding the set in memory; the laws and the differential here are what
-//!   such a backend would be held to.
-//! - **A rebuild verifies again.** `insert` takes `VerifiedCertificate`s, but a cache miss
-//!   reads rows, and the rows are not a witness. Each row is decoded, its signature checked and
-//!   its identity compared with its key's ([`Error::Stored`]), so a file edited outside the
-//!   backend fails the rebuild that reads it instead of lending its rows authority. The cost is
-//!   one signature check per certificate per rebuild; a handle that wrote every commit it later
-//!   reads (the common case) never pays it.
+//! - **Evaluation runs over the subject's closure, loaded on demand.** A query about `S` reads
+//!   `closure(S)` (`S`, every node with standing over it in the positive graph, every certificate
+//!   about those nodes and every revocation naming them) through indexed statements, one round
+//!   per level of derivation depth, and hands exactly those rows to `keyline_memory::State`, the
+//!   reference evaluator. The model document proves nothing outside the closure can change the
+//!   answer, so the backend agrees with the reference by construction; the differential in
+//!   `suite/differential.rs` checks it on random sets. Nothing is held between queries but a
+//!   bounded verification memo. See [`closure`] for the rounds and why a certificate that names a
+//!   node without standing costs one row, and `docs/scratch/hive-store-design.md` for the
+//!   alternatives (materializing the monotone stratum at insert is the next step if closure
+//!   loading shows up in a profile).
+//! - **A read verifies.** `insert` takes `VerifiedCertificate`s, but the rows are not a witness.
+//!   Each row a query reads is decoded, its signature checked and its identity compared with its
+//!   key's ([`Error::Stored`]), so a file edited outside the backend fails the query that reads
+//!   it instead of lending its rows authority. A memo of verified rows, trusted only for the exact
+//!   bytes it verified, keeps that to one check per row per handle.
 //! - **Every query is one snapshot.** The version is read in the same read transaction as the
 //!   rows, so an answer carries the version of the set it read.
 //!
@@ -34,10 +33,10 @@
 //! A grant that must commit with other rows (a document's sedimentree rows and part store, in
 //! one database) goes through [`SqliteKeyline::insert_in`], which writes through a transaction
 //! the caller owns and returns a [`Staged`]; after the caller commits, [`SqliteKeyline::committed`]
-//! brings the cache along. A rollback drops the transaction, which drops the rows and the
-//! version bump with it, and the `Staged` is simply dropped: the cache is never told of a batch
-//! that did not commit. Skipping `committed` after a commit is safe, only slower: the next query
-//! sees a version the cache is not at and rebuilds.
+//! tells the verification memo. A rollback drops the transaction, which drops the rows and the
+//! version bump with it, and the `Staged` is simply dropped. Skipping `committed` after a commit
+//! is safe, only slower: the first read verifies. A caller that answers several questions in a
+//! snapshot of its own, beside reads of other stores, uses [`SqliteKeyline::evaluate_in`].
 //!
 //! # Platforms
 //!
@@ -46,8 +45,9 @@
 //! implements it; a component guest implements it over its `townframe:sqlite` connection. There
 //! is no browser build: `sqlite_rs` has none.
 
-mod cache;
+mod closure;
 mod error;
+mod memo;
 mod rows;
 mod store;
 mod write;
@@ -60,6 +60,7 @@ mod sqlite {
 
 use sqlite_rs as sqlite_rs_alias;
 
+pub use closure::Evaluated;
 pub use error::Error;
 pub use error::StoredFault;
 pub use sqlite::queries::MIGRATION_TABLE;
