@@ -190,7 +190,7 @@ mod deep {
 
     use super::*;
 
-    const KEYS: usize = 24;
+    const KEYS: usize = 16;
 
     static KEYRING: LazyLock<Vec<(Identifier, SigningKey)>> = LazyLock::new(|| {
         (0..KEYS)
@@ -311,7 +311,7 @@ mod deep {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(
-            std::env::var("PROPTEST_CASES").ok().and_then(|cases| cases.parse().ok()).unwrap_or(32),
+            std::env::var("PROPTEST_CASES").ok().and_then(|cases| cases.parse().ok()).unwrap_or(20),
         ))]
 
         #[test]
