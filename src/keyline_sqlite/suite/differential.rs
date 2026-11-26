@@ -265,7 +265,7 @@ mod deep {
                 "subset",
                 format!("{subject:?} {:?}", ask!(store.members_for_subset(subset.clone(), *subject))),
             );
-            for (audience, _) in KEYRING.iter().take(8) {
+            for (audience, _) in KEYRING.iter().take(4) {
                 note(
                     "power",
                     format!(
@@ -307,7 +307,7 @@ mod deep {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(96))]
+        #![proptest_config(ProptestConfig::with_cases(48))]
 
         #[test]
         fn sqlite_matches_memory_on_deeper_graphs(

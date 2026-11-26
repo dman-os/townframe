@@ -169,14 +169,14 @@ fn every_statement_is_served_by_an_index() {
             (sql.to_string(), lines.join("\n"))
         };
         let (_, about) = plan_prefix(
-            "SELECT kind, digest, signed FROM keyline_certificates WHERE kind = 0 AND subject IN",
+            "SELECT kind, digest, signed FROM keyline_certificates INDEXED BY keyline_delegations_by_subject_audience WHERE kind = 0 AND subject IN",
         );
         assert!(
             about.contains("keyline_delegations_by_subject_audience (subject=?"),
             "{about}"
         );
         let (_, naming) = plan_prefix(
-            "SELECT kind, digest, signed FROM keyline_certificates WHERE kind = 1 AND revoke IN",
+            "SELECT kind, digest, signed FROM keyline_certificates INDEXED BY keyline_revocations_by_target WHERE kind = 1 AND revoke IN",
         );
         assert!(
             naming.contains("keyline_revocations_by_target (revoke=?"),

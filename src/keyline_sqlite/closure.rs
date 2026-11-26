@@ -78,16 +78,19 @@ async fn fetch(snapshot: &impl QueryExecutor, sql: Sql) -> Result<Vec<Row>, Erro
         .all_with(|row| Ok((row.get("kind")?, row.get("digest")?, row.get("signed")?)))?)
 }
 
+// `INDEXED BY` on both: with an `IN` list the planner otherwise prefers the primary key's `kind`
+// range, which reads every delegation (or revocation) in the set to keep a few. `plans.rs` fails if
+// either statement stops using its index.
 fn about(subjects: &[Identifier]) -> Sql {
     let mut sql =
-        Sql::new("SELECT kind, digest, signed FROM keyline_certificates WHERE kind = 0 AND subject IN ");
+        Sql::new("SELECT kind, digest, signed FROM keyline_certificates INDEXED BY keyline_delegations_by_subject_audience WHERE kind = 0 AND subject IN ");
     sql.bind_list(subjects.iter().map(|subject| subject.to_bytes().to_vec()));
     sql
 }
 
 fn naming(delegations: &[Vec<u8>]) -> Sql {
     let mut sql =
-        Sql::new("SELECT kind, digest, signed FROM keyline_certificates WHERE kind = 1 AND revoke IN ");
+        Sql::new("SELECT kind, digest, signed FROM keyline_certificates INDEXED BY keyline_revocations_by_target WHERE kind = 1 AND revoke IN ");
     sql.bind_list(delegations.iter().cloned());
     sql
 }

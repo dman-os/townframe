@@ -77,7 +77,7 @@ fn unrelated(members: usize) -> Vec<VerifiedCertificate<()>> {
     for member in 2..members + 2 {
         let member = identifier(&key(member));
         let cert = grant(&admin, member, doc_id, Power::Read);
-        if member.as_bytes()[0] % 10 == 0 {
+        if member.as_bytes()[0].is_multiple_of(10) {
             let CertificateId::Delegation(digest) = cert.id() else {
                 unreachable!("a grant is a delegation")
             };
@@ -221,13 +221,15 @@ fn members_of(
     )
 }
 
-/// A role (`OWNERS`) holds a member who stands over the document only through the role: the
-/// loader must compose membership to find the member's own certificates.
+/// Roles nested two deep: `ALICE` stands over the document only as a member of `OWNERS`, and is a
+/// role herself, whose member (4) delegates to a fifth (5). The loader reaches ALICE's own
+/// certificates only by composing membership: `ALICE` is in `R(OWNERS)`, and so in `R(DOC)`.
 fn role_with_member() -> Vec<VerifiedCertificate<()>> {
     vec![
         sign(d(DOC, OWNERS, DOC, Power::Admin)),
         sign(d(OWNERS, ALICE, OWNERS, Power::Admin)),
-        sign(d(ALICE, 3, DOC, Power::Edit)),
+        sign(d(ALICE, 4, ALICE, Power::Admin)),
+        sign(d(4, 5, DOC, Power::Read)),
     ]
 }
 
@@ -235,7 +237,7 @@ fn role_with_member() -> Vec<VerifiedCertificate<()>> {
 fn the_loader_agrees_with_the_reference_on_a_role() {
     let (sqlite, memory) = members_of(&role_with_member(), id(DOC));
     assert_eq!(sqlite, memory);
-    assert!(sqlite.contains_key(&id(3)), "{sqlite:?}");
+    assert!(sqlite.contains_key(&id(5)), "{sqlite:?}");
 }
 
 /// The checks above can fail: with membership composition removed from the loader, the answer
