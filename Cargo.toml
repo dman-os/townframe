@@ -22,6 +22,7 @@ members = [
   "./src/big_automata_sqlite/",
   "./src/big_automata_web/",
   "./src/keyline_sqlite/",
+  "./src/keyhive_sqlite/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
