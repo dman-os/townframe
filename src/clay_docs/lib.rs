@@ -24,7 +24,6 @@ use clay_host::Instance;
 use clay_store::BatchOp;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
-use daybook_types::manifest::RoutineFacetAccess;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -169,12 +168,26 @@ pub enum DocumentError {
     SubscriptionLagged,
 }
 
+/// One facet access right inside a [`DocumentGrant`]. `tag` is the facet's datum NSID; when
+/// `key_id` is set the right covers that tag+id only, otherwise any facet with the tag. It never
+/// names the plug or document that holds the facet: the grant already fixes the document, and
+/// configuration picks which one that is (ADR 028 §4).
+#[derive(Clone, Debug, Default)]
+pub struct FacetAccess {
+    pub tag: String,
+    pub key_id: Option<String>,
+    pub read: bool,
+    pub write: bool,
+    pub create: bool,
+    pub delete: bool,
+}
+
 /// Resolved, host-approved document grants. Owner configuration resolution precedes issuance;
 /// normal document predicate evaluation will likewise precede issuance in the core adapter.
 pub struct DocumentGrant {
     pub document: String,
     pub branch: String,
-    pub facets: Vec<RoutineFacetAccess>,
+    pub facets: Vec<FacetAccess>,
 }
 
 #[derive(Clone)]
@@ -225,7 +238,7 @@ pub struct MockDocuments {
 }
 
 struct Authority {
-    documents: BTreeMap<(String, String), Vec<RoutineFacetAccess>>,
+    documents: BTreeMap<(String, String), Vec<FacetAccess>>,
     revoked: AtomicBool,
 }
 
@@ -440,13 +453,9 @@ impl DocumentService {
         host: &Host,
         instance: &Instance,
         binding: &str,
-        acl: Vec<RoutineFacetAccess>,
+        acl: Vec<FacetAccess>,
     ) -> Result<DocumentRef, AccessError> {
         host.check(instance)?;
-        assert!(
-            acl.iter().all(|access| access.owner_plug_id.is_none()),
-            "a config ACL names no owner plug: configuration picks the document"
-        );
         let (document, branch) = self
             .inner
             .lock()
@@ -1023,7 +1032,7 @@ impl Authority {
                 .get(&(route.document.clone(), route.branch.clone()))
                 .is_some_and(|acl| {
                     acl.iter().any(|access| {
-                        access.tag.0 == route.tag
+                        access.tag == route.tag
                             && access
                                 .key_id
                                 .as_ref()
@@ -1046,7 +1055,7 @@ impl Authority {
             match &selection.facets {
                 FacetSelection::Tags(tags) => {
                     for tag in tags {
-                        if !acl.iter().any(|access| access.read && access.tag.0 == *tag) {
+                        if !acl.iter().any(|access| access.read && access.tag == *tag) {
                             return Err(AccessError::Denied);
                         }
                     }
@@ -1105,7 +1114,7 @@ impl State {
                             [&(document.clone(), record.selection.branch.clone())]
                         {
                             if acl.read
-                                && acl.tag.0 == *tag
+                                && acl.tag == *tag
                                 && let Some(id) = &acl.key_id
                             {
                                 keys.insert((tag.clone(), id.clone()));

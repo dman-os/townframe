@@ -35,7 +35,7 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
             vec![DocumentGrant {
                 document: "allowed".into(),
                 branch: "main".into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                facets: vec![clay_docs::FacetAccess {
                     tag: "config".into(),
                     key_id: Some("count".into()),
                     read: true,
@@ -186,7 +186,7 @@ async fn a_full_delivery_queue_rejects_before_creating_an_optimistic_write() {
             vec![DocumentGrant {
                 document: "allowed".into(),
                 branch: "main".into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                facets: vec![clay_docs::FacetAccess {
                     tag: "config".into(),
                     write: true,
                     ..Default::default()

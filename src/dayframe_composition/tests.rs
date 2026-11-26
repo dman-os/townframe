@@ -694,7 +694,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
             vec![DocumentGrant {
                 document: "notes".into(),
                 branch: "main".into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                facets: vec![clay_docs::FacetAccess {
                     tag: "org.example.note".into(),
                     read: true,
                     ..Default::default()

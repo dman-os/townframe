@@ -4,7 +4,7 @@ use clay_docs::DocumentService;
 use clay_docs::FacetSelection;
 use clay_docs::MockDocuments;
 use clay_docs::OperationStatus;
-use daybook_types::manifest::RoutineFacetAccess;
+use clay_docs::FacetAccess;
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
@@ -32,7 +32,7 @@ impl Rig {
                 vec![DocumentGrant {
                     document: "allowed".into(),
                     branch: "main".into(),
-                    facets: vec![RoutineFacetAccess {
+                    facets: vec![FacetAccess {
                         tag: "config".into(),
                         key_id: Some("count".into()),
                         read: true,

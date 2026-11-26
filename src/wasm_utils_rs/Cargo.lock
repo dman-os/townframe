@@ -508,7 +508,6 @@ dependencies = [
  "clay_collection",
  "clay_host",
  "clay_store",
- "daybook_types",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

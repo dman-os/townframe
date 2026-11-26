@@ -8,7 +8,6 @@ allowed_dependencies = [
     "clay_guest_session",
     "clay_store",
     "clay_surface",
-    "daybook_types",
     "clay_host",
     "clay_mdk",
     "micro_counter",
