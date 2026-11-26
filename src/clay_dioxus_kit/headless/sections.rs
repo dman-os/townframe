@@ -37,6 +37,7 @@
 //! * `tabindex` panics Blitz, so keyboard resizing is gated on [`Renderer::takes_focus`], which the host
 //!   sets through [`Split::renderer`]: browser engines turn it on, Blitz leaves it off.
 use dioxus::html::input_data::MouseButton;
+use super::part;
 use dioxus::prelude::*;
 use std::rc::Rc;
 
@@ -435,7 +436,10 @@ pub fn Sections(
                 if let Some(view) = handles.get(index).filter(|_| index > 0 || first_shown) {
                     div {
                         key: "handle-{index}",
-                        "part": "sections-handle",
+                        "part": part(
+                            "sections-handle",
+                            &[("state", Some(if dragging_handle == Some(index) { "dragging" } else { "idle" }))],
+                        ),
                         role: "separator",
                         "aria-orientation": "vertical",
                         "aria-label": "{view.label}",
@@ -467,7 +471,10 @@ pub fn Sections(
             }
             if folded {
                 div {
-                    "part": "sections-handle",
+                    "part": part(
+                        "sections-handle",
+                        &[("state", Some(if edge_dragging { "dragging" } else { "idle" }))],
+                    ),
                     "data-edge": "",
                     role: "separator",
                     "aria-orientation": "vertical",
@@ -526,7 +533,10 @@ fn PaneView(pane: SectionPane, weight: f64, rule: SizeRule, collapsed: bool) -> 
     };
     rsx! {
         div {
-            "part": "sections-pane",
+            "part": part(
+                "sections-pane",
+                &[("state", Some(if collapsed { "collapsed" } else { "open" }))],
+            ),
             "data-state": if collapsed { "collapsed" } else { "open" },
             role: "region",
             "aria-label": "{pane.name}",
@@ -725,7 +735,7 @@ mod collapse_tests {
         assert!(!page.has_role("separator", "Resize Sidebar and Content"));
         let strip = page.by_role("separator", "Open Sidebar");
         assert_eq!(page.attr(strip, "data-edge").as_deref(), Some(""));
-        assert_eq!(page.attr(strip, "part").as_deref(), Some("sections-handle"));
+        assert_eq!(page.part_name(strip).as_deref(), Some("sections-handle"));
         page.pointer(strip, "pointerdown", 2.0);
         assert_eq!(page.attr(strip, "data-state").as_deref(), Some("dragging"));
         let overlay = page.by_role("presentation", "");

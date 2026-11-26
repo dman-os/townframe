@@ -10,6 +10,7 @@
 //! * Blitz has no keyboard focus today, so the button is reachable by pointer only there. It is a
 //!   native `<button>` and sets no `tabindex`, which would panic Blitz (`KIT-052`); a renderer
 //!   that has focus makes it keyboard-activatable with no change here.
+use super::part;
 use dioxus::prelude::*;
 
 /// What the button does, which decides its accessible name.
@@ -46,6 +47,7 @@ pub fn NavButton(mode: NavButtonMode, onclick: EventHandler<()>) -> Element {
     rsx! {
         button {
             class: "ct-nav-button",
+            "part": part("nav-button", &[("state", Some(mode.state()))]),
             r#type: "button",
             "aria-label": mode.label(),
             "data-state": mode.state(),

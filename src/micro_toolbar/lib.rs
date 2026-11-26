@@ -86,6 +86,7 @@ fn ToolbarButton(
         // (`ct-button`, `data-variant`, `part="button-label"`) itself and takes the kit's skin.
         button {
             class: "ct-button",
+            "part": "button variant-outline size-md",
             r#type: "button",
             "data-variant": "outline",
             "data-size": "md",

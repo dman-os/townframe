@@ -22,6 +22,7 @@ use super::Orientation;
 use super::sections::Renderer;
 use super::use_focus_ring;
 use super::use_instance_id;
+use super::part;
 use dioxus::prelude::*;
 use std::rc::Rc;
 
@@ -154,7 +155,7 @@ pub fn Tabs(
                 r#type: "button",
                 role: "tab",
                 id: tab_id(instance, &item.value),
-                "part": "tabs-tab",
+                "part": part("tabs-tab", &[("state", Some(if active { "active" } else { "inactive" }))]),
                 "aria-selected": if active { "true" } else { "false" },
                 "aria-controls": panel_id(instance, &item.value),
                 "data-state": if active { "active" } else { "inactive" },
@@ -193,7 +194,10 @@ pub fn Tabs(
         }
     });
     rsx! {
-        div { class: "ct-tabs", "data-orientation": orientation.as_str(),
+        div {
+            class: "ct-tabs",
+            "part": part("tabs", &[("orientation", Some(orientation.as_str()))]),
+            "data-orientation": orientation.as_str(),
             div {
                 "part": "tabs-list",
                 role: "tablist",
@@ -216,7 +220,7 @@ pub fn TabPanel(value: String, children: Element) -> Element {
         div {
             role: "tabpanel",
             id: panel_id(tabs.id, &value),
-            "part": "tabs-panel",
+            "part": part("tabs-panel", &[("state", Some(if active { "active" } else { "inactive" }))]),
             "aria-labelledby": tab_id(tabs.id, &value),
             "data-state": if active { "active" } else { "inactive" },
             hidden: !active,
@@ -342,6 +346,8 @@ mod tests {
         );
         assert_eq!(page.attr(list, "part").as_deref(), Some("tabs-list"));
         let root = page.by_class("ct-tabs");
+        assert_eq!(page.attr(root, "part").as_deref(), Some("tabs orientation-horizontal"));
+        page.assert_axes_mirrored(root);
         assert_eq!(
             page.parts(root),
             ["tabs-list", "tabs-panel", "tabs-panel", "tabs-panel", "tabs-panel"]

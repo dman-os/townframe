@@ -21,6 +21,7 @@
 //! works with no focusable child) but focus is neither trapped nor restored; the web
 //! build needs both before it ships (`KIT-052`).
 use crate::WidthClass;
+use super::part;
 use dioxus::prelude::*;
 
 /// Where the sheet sits.
@@ -59,6 +60,14 @@ pub fn Sheet(
     rsx! {
         div {
             class: "ct-sheet",
+            "part": part(
+                "sheet",
+                &[
+                    ("state", Some("open")),
+                    ("placement", Some(placement.value())),
+                    ("width", Some(width.as_str())),
+                ],
+            ),
             "data-state": "open",
             "data-placement": placement.value(),
             "data-width": width.as_str(),

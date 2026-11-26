@@ -34,6 +34,7 @@ use clay_dioxus_kit::ChipVariant;
 use clay_dioxus_kit::PanelPage;
 use clay_dioxus_kit::Separator;
 use clay_dioxus_kit::Status;
+use clay_dioxus_kit::part;
 use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use intxt_core::work::PullState;
@@ -328,7 +329,9 @@ fn PullIntxts(links: Result<Links, CallError>, on_open: EventHandler<Screen>) ->
     rsx! {
         section { "part": "review-section", "aria-label": "Intxts",
             h3 { "part": "review-heading", "Intxts" }
-            ul { "part": "review-items", "data-variant": "spaced",
+            ul {
+                "part": part("review-items", &[("variant", Some("spaced"))]),
+                "data-variant": "spaced",
                 for row in rows {
                     li { {link_row(row, on_open)} }
                 }
@@ -349,7 +352,7 @@ fn link_row(row: LinkRow, on_open: EventHandler<Screen>) -> Element {
             entries,
         } => rsx! {
             button {
-                "part": "review-row",
+                "part": part("review-row", &[("variant", Some("outline"))]),
                 "data-variant": "outline",
                 "aria-label": "Open intxt {title}",
                 onclick: {

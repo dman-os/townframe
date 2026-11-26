@@ -6,6 +6,7 @@
 //! (announced politely). The icon is decorative and drawn by the stylesheet. `dismiss` exists
 //! only when the caller can act on it.
 use super::Status;
+use super::part;
 use dioxus::prelude::*;
 
 #[component]
@@ -22,7 +23,11 @@ pub fn Alert(
         Status::Info | Status::Success => "status",
     };
     rsx! {
-        div { class: "ct-alert", role, "data-status": status.as_str(),
+        div {
+            class: "ct-alert",
+            "part": part("alert", &[("status", Some(status.as_str()))]),
+            role,
+            "data-status": status.as_str(),
             span { "part": "alert-icon", "aria-hidden": "true" }
             div { "part": "alert-content",
                 if let Some(title) = title {
@@ -109,7 +114,7 @@ mod tests {
         let parts: Vec<_> = page
             .children(alert)
             .into_iter()
-            .map(|part| page.attr(part, "part").expect("every child is a part"))
+            .map(|part| page.part_name(part).expect("every child is a part"))
             .collect();
         assert_eq!(parts, ["alert-icon", "alert-content"]);
         let icon = page.children(alert)[0];

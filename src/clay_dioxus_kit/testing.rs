@@ -714,14 +714,58 @@ impl Page {
         }
     }
 
-    /// The `part` of each child element of `node`, in order; every child of a contract
+    /// Every `data-*` axis on `node` is mirrored in its `part` as `<axis>-<value>`, and no axis
+    /// token appears without its attribute: `::part()` takes no attribute selectors, so an
+    /// outside stylesheet reaches an axis only through the token (ADR 059).
+    pub(crate) fn assert_axes_mirrored(&self, node: Node) {
+        const AXES: [&str; 7] = [
+            "state",
+            "variant",
+            "size",
+            "status",
+            "orientation",
+            "placement",
+            "width",
+        ];
+        let part = self.attr(node, "part").unwrap_or_default();
+        let tokens: Vec<&str> = part.split(' ').skip(1).collect();
+        let expected: Vec<String> = AXES
+            .iter()
+            .filter_map(|axis| {
+                self.attr(node, &format!("data-{axis}"))
+                    .map(|value| format!("{axis}-{value}"))
+            })
+            .collect();
+        let mut tokens_sorted = tokens.clone();
+        tokens_sorted.sort_unstable();
+        let mut expected_sorted: Vec<&str> = expected.iter().map(String::as_str).collect();
+        expected_sorted.sort_unstable();
+        assert_eq!(
+            tokens_sorted,
+            expected_sorted,
+            "{}: the part {part:?} must mirror exactly the node's data axes",
+            self.describe(node)
+        );
+    }
+
+    /// The part's own name: the first token of its `part`, before the axis tokens that mirror its
+    /// `data-*` axes (`tabs-tab` of `tabs-tab state-active`).
+    pub(crate) fn part_name(&self, node: Node) -> Option<String> {
+        if self.attr(node, "part").is_some() {
+            self.assert_axes_mirrored(node);
+        }
+        self.attr(node, "part")
+            .map(|part| part.split(' ').next().unwrap_or_default().to_owned())
+    }
+
+    /// The `part` name of each child element of `node`, in order; every child of a contract
     /// component's root or part must be a part, so a child without one fails.
     pub(crate) fn parts(&self, node: Node) -> Vec<String> {
         self.children(node)
             .into_iter()
             .filter(|child| matches!(self.dom.nodes[child.0].kind, Kind::Element { .. }))
             .map(|child| {
-                self.attr(child, "part").unwrap_or_else(|| {
+                self.part_name(child).unwrap_or_else(|| {
                     panic!("{} is a child without a part", self.describe(child))
                 })
             })

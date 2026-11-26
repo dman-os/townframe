@@ -92,6 +92,7 @@
 //!   [`Renderer::takes_focus`]; elsewhere it is pointer-only.
 
 use super::sections::Renderer;
+use super::part;
 use dioxus::prelude::*;
 
 // -- geometry knobs (tuned visually) -----------------------------------------
@@ -617,6 +618,7 @@ pub fn ScrubStrip(
     rsx! {
         div {
             class: "ct-scrub-strip",
+            "part": part("scrub-strip", &[("state", Some(ui_state))]),
             "data-state": ui_state,
             style: "--ct-strip-cell: {cell}px; --ct-strip-inset: {REST_INSET}px; --ct-strip-anchor: {anchor}px; --ct-strip-limit: {limit}px",
             onpointermove: move |event| {
@@ -645,7 +647,10 @@ pub fn ScrubStrip(
             for (index , item) in placed.iter().enumerate() {
                 span {
                     key: "{item.label}",
-                    "part": "scrub-strip-marker",
+                    "part": part(
+                        "scrub-strip-marker",
+                        &[("state", Some(if index == active { "active" } else { "inactive" }))],
+                    ),
                     "data-state": if index == active { "active" } else { "inactive" },
                     "data-hover": if view.hovered == Some(index) { Some("") } else { None },
                     "aria-hidden": "true",

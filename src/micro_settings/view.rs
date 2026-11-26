@@ -9,6 +9,7 @@ use clay_dioxus_kit::Card;
 use clay_dioxus_kit::CardContent;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::part;
 use clay_mdk::Error;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
@@ -79,7 +80,10 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                     leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
                 }
             },
-        div { class: "ct-settings", "data-state": "list",
+        div {
+            class: "ct-settings",
+            "part": part("settings", &[("state", Some("list"))]),
+            "data-state": "list",
             Stylesheet { css: STYLES }
             div { "part": "settings-preferences",
               Card {
@@ -169,7 +173,11 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
         return rsx! { p { role: "alert", "The {key} section is not available." } };
     };
     rsx! {
-        section { class: "ct-settings", "data-state": "section", "aria-label": "{row.value.title}",
+        section {
+            class: "ct-settings",
+            "part": part("settings", &[("state", Some("section"))]),
+            "data-state": "section",
+            "aria-label": "{row.value.title}",
             Stylesheet { css: STYLES }
             PanelPage {
                 app_bar: rsx! {

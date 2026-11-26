@@ -15,6 +15,7 @@
 //! the guest's own tree, where there is no scaffold context, and has to ask the shell to navigate
 //! and cannot mark the open row until the shell can report the open row reactively.
 use super::list_details::use_list_details;
+use super::part;
 use dioxus::prelude::*;
 
 #[component]
@@ -30,6 +31,7 @@ pub fn ListRow(
     rsx! {
         button {
             class: "ct-list-row",
+            "part": part("list-row", &[("state", Some(if current { "current" } else { "idle" }))]),
             r#type: "button",
             "aria-label": "{name}",
             "aria-current": current.then_some("true"),

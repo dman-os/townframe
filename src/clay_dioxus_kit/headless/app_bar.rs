@@ -14,13 +14,17 @@
 //! The title is an `h2`: a panel is a region of its own, and its app bar names it. A bar nested
 //! in details beside a list therefore reads as a second top-level section, which is what the
 //! arrangement is.
+use super::part;
 use dioxus::prelude::*;
 
 #[component]
 pub fn AppBar(title: String, leading: Option<Element>, trailing: Option<Element>) -> Element {
     let state = if leading.is_some() { "leading" } else { "bare" };
     rsx! {
-        header { class: "ct-app-bar", "data-state": state,
+        header {
+            class: "ct-app-bar",
+            "part": part("app-bar", &[("state", Some(state))]),
+            "data-state": state,
             if let Some(leading) = leading {
                 div { "part": "app-bar-leading", {leading} }
             }

@@ -32,6 +32,7 @@
 //! and Android reserves the edge for the system back gesture (the Android findings in the shell
 //! ledger).
 use crate::WidthClass;
+use super::part;
 use dioxus::prelude::*;
 
 #[component]
@@ -48,6 +49,7 @@ pub fn Drawer(
     rsx! {
         div {
             class: "ct-drawer",
+            "part": part("drawer", &[("state", Some("open")), ("placement", Some("leading"))]),
             "data-state": "open",
             "data-placement": "leading",
             button {
