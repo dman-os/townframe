@@ -1206,10 +1206,9 @@ inside the transaction. This ties together:
   - When the group-part worker adds a member, it consults the outbox, and the parked want
     becomes fetchable.
   - Parked entries are tracked per peer, capped per peer and given a TTL.
-  - When entries are dropped, record "(peer, part) lossy since rev R" and **lazily** rewind that
-    peer's part cursor to R, only when a local membership add later lands on that part. An eager
-    rewind loops: the peer re-sends, the cap busts again. Lowering a part cursor is already a
-    defined restart (`PartLifecycle` law 10).
+  - Dropped entries are simply dropped. **Parked (operator):** rewinding the peer's cursor on a
+    drop, which is footgun-prone: an eager rewind loops, and a lazy one adds machinery. Revisit if
+    the walk's latency proves too slow.
   - The bucket walk remains the safety net, since a local membership change moves the part's
     fingerprint.
 - **Upstreaming:** drafts open inside our forks (base `upstream-main`), the operator reviews
