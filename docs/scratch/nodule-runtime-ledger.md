@@ -174,6 +174,20 @@ Items are open unless noted; verify against the stack before starting.
 - Test infra: big_node's guest e2e reads `test_nodule_guest.wasm` from a mbx-managed target that gc can delete; build the guest into a path mbx does not manage or have the test build it.
 - Windows work collects in `docs/scratch/windows-todo.md` and lands as one PR on a Windows machine.
 
+### dpaths import (operator, 2026-11-26; today's focus)
+
+- Land dpaths feature by feature. First: **import** existing files from disk into documents, through **one lens**: file → Blob datum + dpath datum. No pauperfuse, no export lenses, no dtree yet. The vtree (#47's `pauperfuse`) stays the eventual engine for incremental materialization, for checkouts and for guests' custom VFS. The operator hasn't reviewed #47's pauperfuse or lens code and doubts its design.
+- Slots use ADR 035's Go string-literal escaping (decided in the 2026-10-14 session), not URL encoding.
+- Layers:
+  1. `Dpath` in `datum_core` plus the `org.example.daybook.dpath` datum (`stack/node-108-dpath`, Sonnet lane);
+  2. `day import <path…> --drawer <d> [--under /prefix]`:
+     - mint blobs `put` and docs `create` at `drawer <id>`;
+     - `blobs.importFile` over the descriptor socket (`NodeClient::import_files`, already written);
+     - `CreateDoc { placement: "drawer <id>", datums: {Blob, dpath} }`;
+     - re-import matches by dpath within the drawer (`HasKey` inside `InDrawer`): same digest → skip, different → `WriteDatums` with the new Blob;
+  3. a dpath-prefix predicate (a range scan on `big_cabinet_datum_set_entries`' key index) for permbinds.
+- The last #47 working session is atuin `01a12c3170da7a6ebba4b41f1c08dbaa` (2026-10-11/12).
+
 ## Deferred
 
 - wflow service and durable procedures (D3: durable work goes through a wflow service; convention that durable mutations default to wflow; waits for the wflow rework in `../townframe-p3N`); POSIX providers; triage/processors and big_tasks (D5: tasks decide which node, dispatch decides whether and how locally); network/XRPC exposure; single-instance services.
@@ -183,6 +197,20 @@ Items are open unless noted; verify against the stack before starting.
 - A virtual `wasi:filesystem` for guests (ADR 051).
 - Not offering node-local methods to other nodes at all (ADR 042 §3 only refuses at call time): mount them only on local transports' routers vs one router filtering by origin; ties into a "list providers/methods" operation and network exposure.
 - Shelved to this week: the atmosphere border and dpaths (above).
+- **Index frontiers (parked by the operator, 2026-11-26).** Several cabinet indexes are derived from the same change stream, and a read that combines them can see one ahead of another. That's the drawer-membership lost wakeup: the datum-set revision moved before `big_cabinet_drawer_docs` did.
+  - Two tools.
+    - **(A) One stream, one transaction:** derive the index inside the datum-set worker's `settle`, as reference edges already are and as drawer membership now is (node-107). Right when the index comes from the same stream and database and is cheap to compute inline.
+    - **(B) Global cursors with read barriers:** the datum-set revision is the node's global counter. Every downstream index exposes a frontier, the **low watermark over its parked/unresolved work**, not its high-water mark. A read that combines indexes declares `as_of r` and waits until every frontier it touches has passed r. Polls already carry their page revision.
+  - B is for indexes in other stores or processes, or ones that are expensive: blob placement versus rosters, keyhive membership versus docs, search, cross-node.
+  - The trap: parked routes let a plain "settled through r" cursor lie. That's why `big-blobs-drawer-design.md` §11 rejected B for edges, so the frontier must be the minimum over unresolved work.
+  - Prior art:
+    - event-sourcing projections (RavenDB `WaitForNonStaleResults`, Marten, EventStoreDB checkpoints);
+    - streaming watermarks (Flink, Beam);
+    - frontiers and progress tracking in Naiad / differential dataflow / Materialize ("as of t" across sources);
+    - closed timestamps and safe time (CockroachDB, Spanner);
+    - Raft ReadIndex;
+    - log-position tagging in ElectricSQL and Rocicorp Zero.
+  - When picked up: a short ADR, "index frontiers", that could replace today's ad hoc `settled` watches.
 
 ### Operator review session (2026-11-24, deep work)
 

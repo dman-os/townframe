@@ -5,13 +5,15 @@ description: Run a lane's work as one stack of small draft PRs (gh stack): namin
 
 # One lane, one stack of small PRs
 
-The operator's rules for every lane (nodules #101 is the reference stack). PRs exist so work stays small
+The operator's rules for every lane (the nodules stack, #408, is the reference). PRs exist so work stays small
 and easy to review; that is the whole point, so minimize coordination effort around them.
 
 **Operator, 2026-11-18:** don't spend effort making every PR clean; mechanical splits are fine. The
-operator does not use GitHub stack merging (it has problems): later they pick N PRs and merge them
-with their own tooling, which needs no rebasing of everything at once. So the restacking below is
-optional hygiene, not a requirement.
+restacking below is optional hygiene, not a requirement.
+
+**Operator, 2026-11-25:** nothing reaches main before the operator has reviewed it, and drafts may sit
+for weeks. Lanes don't rebase or green anything ahead of review. The operator names a review section
+→ the owning lane greens that section's tip → the PR marshal (the nodules lane) merges it.
 
 ## Shape
 
@@ -65,8 +67,14 @@ that is never a PR base.
 
 ## Review and merge
 
-The operator reviews and merges, choosing PRs with their own tooling; nothing merges before their
-review, and lanes don't merge with GitHub's stack merging. Ask the operator before anything else.
+The operator reviews; the PR marshal (the nodules lane) merges, keeps `docs/scratch/pr-marshal-ledger.md`,
+and tells the operator which section to review next. Lanes don't merge themselves. Post your intended cut
+point in the swarm log.
+
+Merging a native-stack PR: the per-PR endpoint refuses it (403), so merge the section's top PR with
+`PUT /pulls/{n}/merge-async` (squash). Every PR below it must be open and not a draft. Never move a
+stacked PR's branch to a commit with nothing over its base: GitHub closes the PR, refuses to reopen
+it, and won't remove it from the stack. The ledger's "How to land a stack" has the rest.
 
 ## Conventions
 

@@ -1,6 +1,6 @@
 # ADR 038: Node orientations and the relay alpha
 
-**Status:** Accepted direction (operator, 2026-11-11). The names "mother" and "sister" are provisional.
+**Status:** Accepted direction (operator, 2026-11-11). Amended by [ADR 056](056-node-relationships-drawer-roles-and-the-default-topology.md): "sister" is now **twin**, and drawers list their anchors.
 
 **Related:**
 - [ADR 033: what a node is](033-what-a-node-is.md) (the peer policy hook; one ADR per composition)
