@@ -396,6 +396,7 @@ impl<O> Document<O> {
                     frontier,
                     out,
                 }) => {
+                    let changed = bytes.is_some();
                     self.pending.push(Command::Prepared {
                         plan,
                         result: Ok(PlanPrepared {
@@ -404,7 +405,11 @@ impl<O> Document<O> {
                             out,
                         }),
                     });
-                    self.writes = Writes::HeldForPlan { plan, frontier };
+                    self.writes = Writes::HeldForPlan {
+                        plan,
+                        frontier,
+                        changed,
+                    };
                     false
                 }
             },

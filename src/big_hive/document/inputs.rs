@@ -183,6 +183,14 @@ impl<O> Document<O> {
         });
     }
 
+    /// [`Document::prepare`] or [`Document::prepare_ingest`], by what the work is.
+    pub fn prepare_work(&mut self, plan: PlanId, work: Work<O>) {
+        match work {
+            Work::Op(op) => self.prepare(plan, op),
+            Work::Changes(changes) => self.prepare_ingest(plan, changes),
+        }
+    }
+
     /// As [`Document::prepare`], for changes an external author built.
     pub fn prepare_ingest(&mut self, plan: PlanId, changes: Vec<Change>) {
         self.queue.push_back(Queued::Plan {
@@ -197,6 +205,7 @@ impl<O> Document<O> {
         let Writes::HeldForPlan {
             plan: held,
             frontier,
+            ..
         } = std::mem::replace(&mut self.writes, Writes::Idle)
         else {
             panic!("apply for plan {plan}, which holds no document");
@@ -209,10 +218,19 @@ impl<O> Document<O> {
     /// hydrated again from committed state. A plan still waiting in the queue is forgotten.
     pub fn abort(&mut self, plan: PlanId) {
         match &self.writes {
-            Writes::HeldForPlan { plan: held, .. } if *held == plan => {
+            Writes::HeldForPlan {
+                plan: held,
+                changed,
+                ..
+            } if *held == plan => {
+                let changed = *changed;
                 self.writes = Writes::Idle;
-                // the coordinator may have sent the commit before it gave up on the plan
-                self.forget_write(true);
+                // A plan that changed nothing has nothing to forget. Otherwise the coordinator
+                // may have sent the commit before it gave up on the plan, so the change is
+                // thrown away and the next one is made under a fresh actor.
+                if changed {
+                    self.forget_write(true);
+                }
             }
             _ => self
                 .queue
@@ -296,12 +314,13 @@ impl<O> Document<O> {
                     .expect("committed changes apply");
                 live.applied_rev = found.rev;
                 self.known_rev = self.known_rev.max(found.rev);
-                live.remote = if !found.blocked.is_empty() {
+                // (a tree that moved on while this was read is asked again, blocked or not)
+                live.remote = if self.known_rev > live.applied_rev {
+                    Remote::Behind
+                } else if !found.blocked.is_empty() {
                     Remote::Blocked {
                         refs: found.blocked,
                     }
-                } else if self.known_rev > live.applied_rev {
-                    Remote::Behind
                 } else {
                     Remote::UpToDate
                 };
@@ -486,11 +505,13 @@ impl<O> Document<O> {
     }
 }
 
-/// A document that is up to date and finds the tree ahead is behind. Nothing else moves here:
-/// `Behind` also means "ask again" (keys arrived for blocked content), which only a decryption
-/// ends.
+/// A document that is up to date, or blocked on keys, and finds the tree ahead is behind: what
+/// is new may be readable, and nothing else would ask again. Nothing else moves here: `Behind`
+/// also means "ask again" (keys arrived for blocked content), which only a decryption ends.
 fn settle(live: &mut Live, known_rev: Rev) {
-    if matches!(live.remote, Remote::UpToDate) && known_rev > live.applied_rev {
+    if matches!(live.remote, Remote::UpToDate | Remote::Blocked { .. })
+        && known_rev > live.applied_rev
+    {
         live.remote = Remote::Behind;
     }
 }

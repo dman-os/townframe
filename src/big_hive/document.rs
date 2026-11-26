@@ -226,7 +226,7 @@ mod pump;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -491,9 +491,18 @@ enum Frontier {
 }
 
 /// What a write is: a caller's closure, or changes an external author built.
-enum Work<O> {
+pub enum Work<O> {
     Op(WriteOp<O>),
     Changes(Vec<Change>),
+}
+
+impl<O> std::fmt::Debug for Work<O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Work::Op(_) => write!(f, "Op(..)"),
+            Work::Changes(changes) => write!(f, "Changes({})", changes.len()),
+        }
+    }
 }
 
 /// A change made on the live document, waiting for its commit.
@@ -529,6 +538,9 @@ enum Writes<O> {
     HeldForPlan {
         plan: PlanId,
         frontier: Option<FrontierRow>,
+        /// Whether the work changed anything: a plan that did not has nothing to apply, and
+        /// aborting it costs nothing.
+        changed: bool,
     },
 }
 

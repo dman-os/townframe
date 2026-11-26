@@ -82,8 +82,30 @@ impl<O> Document<O> {
 }
 
 impl<O> Document<O> {
+    /// When a backoff ends, for a drain to wait it out.
+    pub(crate) fn next_retry(&self) -> Option<Instant> {
+        self.retry.until
+    }
+
+    /// The plan the document is held for, if any.
+    pub(crate) fn held_plan(&self) -> Option<PlanId> {
+        match self.writes {
+            Writes::HeldForPlan { plan, .. } => Some(plan),
+            _ => None,
+        }
+    }
+
+    /// The keys of the live document, `None` if there is none.
+    pub(crate) fn live_keys(&self) -> Option<std::collections::BTreeSet<String>> {
+        use automerge::ReadDoc;
+        match &self.phase {
+            Phase::Live(live) => Some(live.doc.keys(automerge::ROOT).collect()),
+            _ => None,
+        }
+    }
+
     /// The states of the four machines and the revisions, as text for traces.
-    pub(in crate::document) fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         let phase = match &self.phase {
             Phase::Cold => "cold".to_string(),
             Phase::Hydrating { .. } => "hydrating".to_string(),

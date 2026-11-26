@@ -19,13 +19,13 @@ use automerge::transaction::Transactable;
 
 use super::*;
 
-pub(in crate::document) struct Stored {
+pub(crate) struct Stored {
     pub change: Change,
     pub rev: Rev,
     pub keyed: bool,
 }
 
-pub(in crate::document) struct DocModel {
+pub(crate) struct DocModel {
     pub changes: Vec<Stored>,
     pub tree_rev: Rev,
     pub readable: bool,
@@ -36,7 +36,7 @@ pub(in crate::document) struct DocModel {
     remote_writes: u64,
 }
 
-pub(in crate::document) struct World {
+pub(crate) struct World {
     pub docs: Vec<DocModel>,
     /// Whether a commit's frontier row is checked against the revision it expects. Off, it is
     /// written whatever the tree held (a store without the compare-and-set).
