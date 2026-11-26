@@ -64,10 +64,20 @@ pub(super) const DOCS: usize = 3;
 enum Ask {
     Hydrate,
     Decrypt,
-    Publish { heads: Vec<ChangeHash>, rev: Rev },
+    Publish {
+        heads: Vec<ChangeHash>,
+        rev: Rev,
+    },
     Actor,
-    Encrypt { change: Vec<u8> },
-    Commit { rows: Vec<DocRows> },
+    Encrypt {
+        plan: PlanId,
+        doc: usize,
+        change: Vec<u8>,
+    },
+    Commit {
+        plan: PlanId,
+        rows: Vec<DocRows>,
+    },
 }
 
 enum Owner {
@@ -131,6 +141,15 @@ pub(super) struct Sim {
     /// The documents of the plans that have started and not been answered.
     in_flight: BTreeMap<PlanId, Vec<usize>>,
     answered: BTreeSet<Ticket>,
+    /// The epoch of the last encryption answer for each document of each plan, and how many
+    /// encryptions have answered.
+    encrypted_epoch: BTreeMap<(PlanId, usize), u64>,
+    serial: BTreeMap<(PlanId, usize), u32>,
+    /// Where a stale answer left each document, and the plans waiting to commit again.
+    stale_serial: BTreeMap<(PlanId, usize), u32>,
+    awaiting_recommit: BTreeSet<PlanId>,
+    /// The epochs of all documents when each plan started, for the executor that checks too much.
+    epoch_snapshot: BTreeMap<PlanId, Vec<u64>>,
     replies: BTreeMap<Ticket, Answer<Out>>,
     issued: BTreeSet<u64>,
     settled: BTreeSet<u64>,
@@ -169,6 +188,11 @@ impl Sim {
             order: vec![],
             in_flight: BTreeMap::new(),
             answered: BTreeSet::new(),
+            encrypted_epoch: BTreeMap::new(),
+            serial: BTreeMap::new(),
+            stale_serial: BTreeMap::new(),
+            awaiting_recommit: BTreeSet::new(),
+            epoch_snapshot: BTreeMap::new(),
             replies: BTreeMap::new(),
             issued: BTreeSet::new(),
             settled: BTreeSet::new(),
@@ -323,12 +347,27 @@ impl Sim {
                         );
                     }
                     self.in_flight.insert(plan, docs);
+                    self.epoch_snapshot
+                        .insert(plan, self.world.docs.iter().map(|d| d.epoch).collect());
                 }
                 self.docs[doc].prepare_work(plan, work);
                 self.flush_doc(doc);
             }
-            Command::PrepareEncrypt { call, change, .. } => {
-                self.fly(Owner::Coordinator, call, Ask::Encrypt { change });
+            Command::PrepareEncrypt {
+                call,
+                plan,
+                doc,
+                change,
+            } => {
+                self.fly(
+                    Owner::Coordinator,
+                    call,
+                    Ask::Encrypt {
+                        plan,
+                        doc: doc as usize,
+                        change,
+                    },
+                );
             }
             Command::Commit { call, plan, rows } => {
                 let docs: BTreeSet<_> =
@@ -337,7 +376,24 @@ impl Sim {
                     rows.iter().all(|row| docs.contains(&row.doc)),
                     "a commit carries only its plan's documents"
                 );
-                self.fly(Owner::Coordinator, call, Ask::Commit { rows });
+                // law 8: each row carries the epoch of the latest encryption answer for its document, and
+                // a document that was stale was encrypted again
+                for row in &rows {
+                    let key = (plan, row.doc as usize);
+                    assert_eq!(
+                        row.if_epoch,
+                        self.encrypted_epoch.get(&key).copied(),
+                        "plan {plan}: a row carries an epoch that is not its encryption's (law 8)"
+                    );
+                    if let Some(at) = self.stale_serial.get(&key) {
+                        assert!(
+                            self.serial[&key] > *at,
+                            "plan {plan}: committed again without encrypting the stale document (law 8)"
+                        );
+                    }
+                }
+                self.awaiting_recommit.remove(&plan);
+                self.fly(Owner::Coordinator, call, Ask::Commit { plan, rows });
             }
             Command::SettleEncrypt { token, .. } => {
                 assert!(
@@ -350,6 +406,10 @@ impl Sim {
                 );
             }
             Command::Apply { doc, plan, landed } => {
+                assert!(
+                    !self.awaiting_recommit.contains(&plan),
+                    "plan {plan} was applied after a stale commit (law 7)"
+                );
                 self.release(plan, doc as usize);
                 self.docs[doc as usize].apply(plan, landed);
                 self.flush_doc(doc as usize);
@@ -443,6 +503,9 @@ impl Sim {
                 );
             }
             Err(PlanError::Failed) => {}
+            Err(PlanError::Stale { .. }) => {
+                assert_eq!(committed, 0, "plan {plan} was stale and committed (law 7)");
+            }
         }
         self.in_flight.remove(&plan);
         self.replies.insert(ticket, result);
@@ -511,6 +574,11 @@ impl Sim {
             Part::Noop => Work::Op(Box::new(|_| Ok(vec![]))),
             Part::Bad => Work::Op(Box::new(|tx| tx.insert(ROOT, 0, 1_i64).map(|()| vec![]))),
         }
+    }
+
+    /// A membership change moves a document's key epoch.
+    pub fn move_epoch(&mut self, doc: usize) {
+        self.world.docs[doc].epoch += 1;
     }
 
     pub fn remote_write(&mut self, doc: usize, keyed: bool) {
@@ -598,21 +666,38 @@ impl Sim {
                 self.docs[doc].actor_assigned(flight.call, ActorId::from(actor));
                 self.flush_doc(doc);
             }
-            (Owner::Coordinator, Ask::Encrypt { change }) => {
+            (Owner::Coordinator, Ask::Encrypt { plan, doc, change }) => {
                 let out = if refused {
                     failed(cancelled)
                 } else {
                     self.next_token += 1;
                     self.issued.insert(self.next_token);
+                    let epoch = self.world.docs[doc].epoch;
+                    self.encrypted_epoch.insert((plan, doc), epoch);
+                    *self.serial.entry((plan, doc)).or_default() += 1;
                     Outcome::Done(EncryptedChange {
                         token: self.next_token,
                         ciphertext: change,
+                        epoch,
                     })
                 };
                 self.coordinator.encrypted(flight.call, out);
                 self.flush_coordinator();
             }
-            (Owner::Coordinator, Ask::Commit { rows }) => {
+            (Owner::Coordinator, Ask::Commit { plan, rows }) => {
+                // the commit's transaction checks the epochs of the plan's documents (and, for
+                // the planted executor, of every document)
+                let stale = self.stale_doc(plan, &rows);
+                if let Some(doc) = stale {
+                    self.awaiting_recommit.insert(plan);
+                    if let Some(serial) = self.serial.get(&(plan, doc)) {
+                        self.stale_serial.insert((plan, doc), *serial);
+                    }
+                    self.coordinator
+                        .committed(flight.call, Outcome::Stale { doc: doc as u64 });
+                    self.flush_coordinator();
+                    return;
+                }
                 let batch: Vec<_> = rows
                     .iter()
                     .map(|row| {
@@ -654,6 +739,22 @@ impl Sim {
         }
     }
 
+    /// The first document whose epoch the commit finds moved.
+    fn stale_doc(&self, plan: PlanId, rows: &[DocRows]) -> Option<usize> {
+        let own = rows
+            .iter()
+            .find(|row| {
+                row.if_epoch
+                    .is_some_and(|e| e != self.world.docs[row.doc as usize].epoch)
+            })
+            .map(|row| row.doc as usize);
+        if self.plant == Some(Plant::CheckAllEpochs) {
+            let snapshot = &self.epoch_snapshot[&plan];
+            return own.or_else(|| (0..DOCS).find(|d| self.world.docs[*d].epoch != snapshot[*d]));
+        }
+        own
+    }
+
     /// Commit rows of several documents in one transaction of the world.
     fn land(&mut self, batch: Vec<(usize, Change, Option<FrontierRow>)>) -> Vec<Landed> {
         let docs: Vec<usize> = batch.iter().map(|(doc, ..)| *doc).collect();
@@ -681,11 +782,14 @@ impl Sim {
     /// The process dies: every machine and call is gone. Bit `i` of `landed` says whether the
     /// `i`th commit in flight had run.
     pub fn crash(&mut self, landed: usize) {
-        let commits: Vec<Vec<DocRows>> = self
-            .flights
-            .drain(..)
+        let flights = std::mem::take(&mut self.flights);
+        let commits: Vec<Vec<DocRows>> = flights
+            .into_iter()
             .filter_map(|flight| match flight.ask {
-                Ask::Commit { rows } => Some(rows),
+                Ask::Commit { plan, rows } => {
+                    // (a commit whose epoch moved was refused)
+                    (self.stale_doc(plan, &rows).is_none()).then_some(rows)
+                }
                 _ => None,
             })
             .collect();

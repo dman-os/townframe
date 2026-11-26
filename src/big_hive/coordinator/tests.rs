@@ -91,7 +91,14 @@ fn a_plan_that_shares_nothing_overtakes_a_blocked_plan() {
 
 #[test]
 fn the_window_bounds_the_plans_in_flight() {
-    let mut sim = Sim::with(1, None, Config { max_plans: 1 });
+    let mut sim = Sim::with(
+        1,
+        None,
+        Config {
+            max_plans: 1,
+            ..Config::default()
+        },
+    );
     sim.settle_documents();
     sim.submit(0b001, &[Write]);
     sim.submit(0b010, &[Write]);
@@ -238,4 +245,65 @@ fn a_plan_that_changes_nothing_commits_nothing() {
         "no encryption, no commit, no actor to replace"
     );
     assert!(sim.reply(plan).is_ok());
+}
+
+#[test]
+fn law_7_and_8_a_stale_commit_applies_nothing_and_the_stale_document_is_encrypted_again() {
+    let mut sim = ready();
+    let plan = sim.submit(0b011, &[Write, Write]);
+    finish_encrypting(&mut sim);
+    // a membership change on document 0 lands between the encryption and the commit
+    sim.move_epoch(0);
+    assert!(sim.complete_kind("commit", 0));
+    assert!(
+        !sim.is_answered(plan),
+        "nothing was applied and the plan is still held"
+    );
+    assert_eq!(sim.world.visible(0), keys(&[]));
+    assert_eq!(sim.world.visible(1), keys(&[]));
+    // only document 0 is encrypted again, and its row carries the new epoch (the rig checks it)
+    assert_eq!(sim.kinds(), ["encrypt"]);
+    assert!(sim.complete_kind("encrypt", 0));
+    assert_eq!(sim.kinds(), ["commit"]);
+    assert!(sim.complete_kind("commit", 0));
+    assert!(sim.reply(plan).is_ok());
+    assert_eq!(sim.world.visible(0), keys(&["l1"]));
+    assert_eq!(sim.world.visible(1), keys(&["l1"]));
+    sim.quiesce();
+}
+
+#[test]
+fn law_9_an_unrelated_documents_epoch_never_fails_a_plan() {
+    let mut sim = ready();
+    let plan = sim.submit(0b011, &[Write, Write]);
+    finish_encrypting(&mut sim);
+    sim.move_epoch(2);
+    assert!(sim.complete_kind("commit", 0));
+    assert!(sim.reply(plan).is_ok(), "committed at once");
+    sim.quiesce();
+}
+
+#[test]
+fn a_plan_that_stays_stale_past_the_retry_limit_aborts() {
+    let mut sim = Sim::with(
+        1,
+        None,
+        Config {
+            max_stale_retries: 1,
+            ..Config::default()
+        },
+    );
+    sim.settle_documents();
+    let plan = sim.submit(0b011, &[Write, Write]);
+    finish_encrypting(&mut sim);
+    sim.move_epoch(0);
+    assert!(sim.complete_kind("commit", 0));
+    assert!(sim.complete_kind("encrypt", 0));
+    // it moves again before the second commit
+    sim.move_epoch(0);
+    assert!(sim.complete_kind("commit", 0));
+    assert_eq!(sim.reply(plan), &Err(PlanError::Stale { doc: 0 }));
+    assert_eq!(sim.world.visible(0), keys(&[]));
+    assert_eq!(sim.world.visible(1), keys(&[]));
+    sim.quiesce();
 }

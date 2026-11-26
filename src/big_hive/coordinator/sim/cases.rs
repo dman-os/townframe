@@ -38,6 +38,7 @@ pub(in crate::coordinator) enum Op {
     Deliver(u8),
     Advance(u8),
     Tick,
+    MoveEpoch(u8),
     Crash {
         landed: u8,
     },
@@ -79,6 +80,7 @@ impl Sim {
             Op::Deliver(pick) => self.deliver(usize::from(pick)),
             Op::Advance(by) => self.advance(Duration::from_millis(250 * u64::from(by))),
             Op::Tick => self.tick(),
+            Op::MoveEpoch(d) => self.move_epoch(doc(d)),
             Op::Crash { landed } => self.crash(usize::from(landed)),
         }
         self.check();
@@ -96,6 +98,7 @@ pub(in crate::coordinator) fn op() -> impl Strategy<Value = Op> {
         8 => any::<u8>().prop_map(Op::Deliver),
         2 => any::<u8>().prop_map(Op::Advance),
         2 => Just(Op::Tick),
+        4 => any::<u8>().prop_map(Op::MoveEpoch),
         1 => any::<u8>().prop_map(|landed| Op::Crash { landed }),
     ]
 }
@@ -239,6 +242,16 @@ fn planted_commit_despite_a_failed_encryption_is_caught() {
 #[test]
 fn planted_forgotten_abort_is_caught() {
     caught(Plant::ForgetToAbort, "law");
+}
+
+#[test]
+fn planted_apply_on_stale_is_caught() {
+    caught(Plant::ApplyOnStale, "law 7");
+}
+
+#[test]
+fn planted_check_of_every_epoch_is_caught() {
+    caught(Plant::CheckAllEpochs, "law 9");
 }
 
 #[test]

@@ -288,6 +288,7 @@ impl<O> Document<O> {
                 self.failed();
             }
             Outcome::Cancelled => self.phase = Phase::Cold,
+            Outcome::Stale { .. } => unreachable!("only a commit goes stale"),
         }
     }
 
@@ -349,6 +350,7 @@ impl<O> Document<O> {
                 self.failed();
             }
             Outcome::Cancelled => live.remote = Remote::Behind,
+            Outcome::Stale { .. } => unreachable!("only a commit goes stale"),
         }
     }
 
@@ -356,12 +358,17 @@ impl<O> Document<O> {
         if !matches!(self.writes, Writes::Encrypting { call: c, .. } if c == call) {
             return;
         }
-        let Writes::Encrypting { ticket, built, .. } =
-            std::mem::replace(&mut self.writes, Writes::Idle)
+        let Writes::Encrypting {
+            ticket,
+            built,
+            attempts,
+            ..
+        } = std::mem::replace(&mut self.writes, Writes::Idle)
         else {
             unreachable!("matched above");
         };
         let Outcome::Done(enc) = outcome else {
+            // (an encryption is never stale: only a commit checks an epoch)
             self.forget_write(false);
             self.answer(ticket, built.out.is_none(), Err(Rejected::Failed));
             return;
@@ -372,6 +379,7 @@ impl<O> Document<O> {
             plan: Plan {
                 change: enc.clone(),
                 frontier: built.frontier.clone(),
+                if_epoch: Some(enc.epoch),
             },
         });
         self.writes = Writes::Committing {
@@ -379,6 +387,7 @@ impl<O> Document<O> {
             ticket,
             token: enc.token,
             built,
+            attempts,
         };
     }
 
@@ -390,12 +399,14 @@ impl<O> Document<O> {
             ticket,
             token,
             built,
+            attempts,
             ..
         } = std::mem::replace(&mut self.writes, Writes::Idle)
         else {
             unreachable!("matched above");
         };
         match outcome {
+            Outcome::Stale { .. } => self.stale(ticket, token, built, attempts),
             Outcome::Done(landed) => {
                 self.pending.push(Command::SettleEncrypt {
                     token,
@@ -416,6 +427,47 @@ impl<O> Document<O> {
                 self.answer(ticket, built.out.is_none(), Err(Rejected::Failed));
             }
         }
+    }
+
+    /// The commit found the document's epoch moved and wrote nothing: drop the preparation,
+    /// encrypt the same change again under the new epoch, and commit again. The change stays in
+    /// the live document, which stays held, so nothing else about the write changes.
+    fn stale(&mut self, ticket: Ticket, token: u64, built: Built<O>, attempts: u32) {
+        self.pending.push(Command::SettleEncrypt {
+            token,
+            applied: false,
+        });
+        #[cfg(test)]
+        if self.plant == Some(Plant::ApplyOnStale) {
+            let landed = match &self.phase {
+                Phase::Live(live) => Landed {
+                    rev: self.known_rev,
+                    prior_rev: live.applied_rev,
+                },
+                _ => unreachable!("a write holds a live document"),
+            };
+            self.land(built.frontier.as_ref().map(|row| row.if_prior_rev), landed);
+            let ingest = built.out.is_none();
+            self.answer(ticket, ingest, Ok(built.out));
+            return;
+        }
+        if attempts >= self.config.max_stale_retries {
+            // the commit wrote nothing, so no actor is at risk: the change is just forgotten
+            self.forget_write(false);
+            self.answer(ticket, built.out.is_none(), Err(Rejected::Stale));
+            return;
+        }
+        let call = self.fresh_call();
+        self.pending.push(Command::PrepareEncrypt {
+            call,
+            change: built.bytes.clone(),
+        });
+        self.writes = Writes::Encrypting {
+            call,
+            ticket,
+            built,
+            attempts: attempts + 1,
+        };
     }
 
     pub fn published(&mut self, call: CallId, outcome: Outcome<()>) {
@@ -452,6 +504,7 @@ impl<O> Document<O> {
                 self.failed();
             }
             Outcome::Cancelled => self.frontier = Frontier::Stale,
+            Outcome::Stale { .. } => unreachable!("only a commit goes stale"),
         }
     }
 

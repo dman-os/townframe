@@ -34,6 +34,8 @@ pub(crate) struct DocModel {
     /// The remote node's replica, which its next change builds on.
     remote: Automerge,
     remote_writes: u64,
+    /// The document's key epoch: a membership change moves it.
+    pub epoch: u64,
 }
 
 pub(crate) struct World {
@@ -88,6 +90,7 @@ impl World {
                     frontier: None,
                     remote: Automerge::new().with_actor(ActorId::from(vec![0xb0, at as u8])),
                     remote_writes: 0,
+                    epoch: 0,
                 })
                 .collect(),
             rev: 0,

@@ -84,6 +84,17 @@
 //!    refused.
 //! 6. **One answer, one settlement.** Every plan is answered exactly once, and every prepared
 //!    encryption is settled exactly once.
+//! 7. **A stale commit applies nothing.** A commit that reports a document's key epoch moved
+//!    wrote nothing, so no Document is applied; the stale encryption is settled as not applied.
+//! 8. **A retry re-encrypts under the new epoch.** The next commit carries, for the stale
+//!    document, the epoch of a new encryption answer, and the plan's documents stay held
+//!    throughout. Only the stale document is encrypted again: each document's epoch is checked
+//!    on its own at every commit, so the others' encryptions are still good unless their own
+//!    epoch moved, which the next stale answer would say. Past the retry limit the plan aborts
+//!    with [`PlanError::Stale`].
+//! 9. **Only a plan's own documents' epochs matter.** The store checks the epochs of the plan's
+//!    documents and no others: a membership change in an unrelated document never fails a plan.
+//!    A stale answer that names a document outside the plan is a bug and panics.
 //!
 //! # Where its neighbours come in
 //!
@@ -100,6 +111,7 @@ use std::collections::VecDeque;
 
 use crate::document::CallId;
 use crate::document::EncryptedChange;
+use crate::document::Epoch;
 use crate::document::FrontierRow;
 use crate::document::Landed;
 use crate::document::Outcome;
@@ -121,11 +133,17 @@ pub type DocId = u64;
 pub struct Config {
     /// The most plans in flight at once.
     pub max_plans: usize,
+    /// How many times a plan whose commit found a document's epoch stale encrypts that document
+    /// again before it is aborted with [`PlanError::Stale`].
+    pub max_stale_retries: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { max_plans: 8 }
+        Self {
+            max_plans: 8,
+            max_stale_retries: 3,
+        }
     }
 }
 
@@ -136,6 +154,8 @@ pub enum PlanError {
     Refused { doc: DocId, why: Rejected },
     /// Encrypting or committing failed.
     Failed,
+    /// The key epoch of `doc` kept moving between encryption and commit, past the retry limit.
+    Stale { doc: DocId },
 }
 
 /// A plan's answer: each document's output, in the order the plan named its documents, or why
@@ -148,6 +168,9 @@ pub struct DocRows {
     pub doc: DocId,
     pub change: EncryptedChange,
     pub frontier: Option<FrontierRow>,
+    /// The store refuses the commit if this document's epoch is no longer this. Only the
+    /// plan's own documents are checked.
+    pub if_epoch: Option<Epoch>,
 }
 
 #[derive(Debug)]
@@ -227,6 +250,8 @@ struct Running<O> {
     /// The plan's documents in the order it named them.
     docs: Vec<DocId>,
     stage: Stage<O>,
+    /// Encryptions repeated so far because the commit found an epoch stale.
+    stale_retries: u32,
 }
 
 /// Bugs planted on purpose, to show the simulation catches them (see `tests`).
@@ -243,6 +268,11 @@ pub(crate) enum Plant {
     ForgetToAbort,
     /// An aborted plan forgets to settle its encryptions (law 6).
     ForgetToSettle,
+    /// A commit found stale is applied as if it had landed (law 7).
+    ApplyOnStale,
+    /// The store checks the epoch of every document, not only the plan's (law 9). The machine
+    /// is not at fault here: the simulation's store is, and the machine refuses its answer.
+    CheckAllEpochs,
 }
 
 /// The machine.
@@ -365,7 +395,8 @@ impl<O> Coordinator<O> {
                     self.commit(plan);
                 }
             }
-            Outcome::Failed | Outcome::Cancelled => {
+            // (an encryption is never stale: only a commit checks an epoch)
+            Outcome::Failed | Outcome::Cancelled | Outcome::Stale { .. } => {
                 #[cfg(test)]
                 if self.plant == Some(Plant::CommitDespiteFailure) {
                     if all_in && !encrypted.is_empty() {
@@ -393,7 +424,82 @@ impl<O> Coordinator<O> {
         match outcome {
             Outcome::Done(landed) => self.release(plan, landed),
             Outcome::Failed | Outcome::Cancelled => self.abort(plan, PlanError::Failed, None),
+            Outcome::Stale { doc } => self.stale(plan, doc as DocId),
         }
+    }
+
+    /// The commit found `doc`'s epoch moved and wrote nothing. Encrypt that document again, under
+    /// the new epoch, and commit again; the others keep their encryptions, because the store
+    /// checks each document's own epoch again at the next commit, and the plan's documents stay
+    /// held throughout. Past the retry limit the plan aborts.
+    fn stale(&mut self, plan: PlanId, doc: DocId) {
+        let running = self.running.get_mut(&plan).expect("a plan in flight");
+        assert!(
+            running.docs.contains(&doc),
+            "a commit is stale only for a document of its plan (law 9)"
+        );
+        #[cfg(test)]
+        if self.plant == Some(Plant::ApplyOnStale) {
+            let Stage::Committing { encrypted, .. } = &running.stage else {
+                unreachable!("a stale answer is to a commit");
+            };
+            let landed = encrypted
+                .keys()
+                .map(|doc| {
+                    (
+                        *doc,
+                        Landed {
+                            rev: 0,
+                            prior_rev: 0,
+                        },
+                    )
+                })
+                .collect();
+            self.release(plan, landed);
+            return;
+        }
+        if running.stale_retries >= self.config.max_stale_retries {
+            self.abort(plan, PlanError::Stale { doc }, None);
+            return;
+        }
+        running.stale_retries += 1;
+        let Stage::Committing {
+            prepared,
+            encrypted,
+            ..
+        } = &mut running.stage
+        else {
+            unreachable!("a stale answer is to a commit");
+        };
+        let (prepared, mut encrypted) = (std::mem::take(prepared), std::mem::take(encrypted));
+        let stale = encrypted
+            .remove(&doc)
+            .expect("the stale document was encrypted");
+        let change = prepared[&doc]
+            .change
+            .clone()
+            .expect("an encrypted document changed");
+        running.stage = Stage::Encrypting {
+            calls: BTreeMap::new(),
+            prepared,
+            encrypted,
+        };
+        let call = self.fresh_call();
+        let running = self.running.get_mut(&plan).expect("a plan in flight");
+        let Stage::Encrypting { calls, .. } = &mut running.stage else {
+            unreachable!("just set");
+        };
+        calls.insert(call, doc);
+        self.pending.push(Command::SettleEncrypt {
+            token: stale.token,
+            applied: false,
+        });
+        self.pending.push(Command::PrepareEncrypt {
+            call,
+            plan,
+            doc,
+            change,
+        });
     }
 
     /// Start the plans that can start, and take the commands.
@@ -475,6 +581,7 @@ impl<O> Coordinator<O> {
                     prepared: BTreeMap::new(),
                 },
                 docs,
+                stale_retries: 0,
             },
         );
     }
@@ -540,6 +647,7 @@ impl<O> Coordinator<O> {
                     doc: *doc,
                     change: encrypted.get(doc)?.clone(),
                     frontier: prepared[doc].frontier.clone(),
+                    if_epoch: Some(encrypted[doc].epoch),
                 })
             })
             .collect();

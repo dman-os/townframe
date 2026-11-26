@@ -82,6 +82,11 @@ impl Sim {
         }
     }
 
+    /// A membership change moves the document's key epoch.
+    pub(in crate::document) fn move_epoch(&mut self, doc: usize) {
+        self.world.docs[doc].epoch += 1;
+    }
+
     pub(in crate::document) fn deliver_all(&mut self) {
         while !self.mail.is_empty() {
             self.deliver(0);

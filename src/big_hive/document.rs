@@ -68,8 +68,11 @@
 //! - `Idle`.
 //! - `Encrypting { call }`: the change is made (it is in the live document, which nobody may
 //!   look at) and out for encryption.
-//! - `Committing { call }`: the encrypted change and its frontier row are out as a
-//!   [`Command::Commit`].
+//! - `Committing { call }`: the encrypted change, its frontier row and the epoch it was
+//!   encrypted under are out as a [`Command::Commit`]. If the commit reports the epoch stale (a
+//!   membership change landed since), nothing was written: the machine encrypts the same
+//!   change again, which is the only part that depends on the epoch, and commits again, up to
+//!   [`Config::max_stale_retries`] times, and then answers [`Rejected::Stale`].
 //! - `HeldForPlan { plan }`: the document was prepared for a multi-document plan (see below)
 //!   and waits for [`Document::apply`] or [`Document::abort`]. Nothing else is prepared or
 //!   committed on the document until then.
@@ -267,6 +270,9 @@ pub struct Config {
     /// write is answered to its caller and never retried here.
     pub min_backoff: Duration,
     pub max_backoff: Duration,
+    /// How many times a write whose commit found its epoch stale encrypts again before it is
+    /// answered with [`Rejected::Stale`].
+    pub max_stale_retries: u32,
 }
 
 impl Default for Config {
@@ -275,6 +281,7 @@ impl Default for Config {
             idle_ttl: Duration::from_secs(30),
             min_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(60),
+            max_stale_retries: 3,
         }
     }
 }
@@ -312,7 +319,16 @@ pub enum Outcome<T> {
     Done(T),
     Failed,
     Cancelled,
+    /// A commit only: the transaction found that the epoch of document `doc` is not the one the
+    /// plan was encrypted under, and wrote nothing.
+    Stale {
+        doc: u64,
+    },
 }
+
+/// A document's key epoch: the version of its CGKA state that content is encrypted under. A
+/// membership change moves it.
+pub type Epoch = u64;
 
 /// Content that has no key yet, named by what the driver knows it by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -337,6 +353,8 @@ pub struct Materialized {
 pub struct EncryptedChange {
     pub token: u64,
     pub ciphertext: Vec<u8>,
+    /// The document's key epoch the content was encrypted under.
+    pub epoch: Epoch,
 }
 
 /// What a commit's transaction reports for this document's tree.
@@ -363,6 +381,9 @@ pub struct FrontierRow {
 pub struct Plan {
     pub change: EncryptedChange,
     pub frontier: Option<FrontierRow>,
+    /// The commit is refused ([`Outcome::Stale`]) if the document's epoch is no longer this.
+    /// Only the plan's own documents are checked.
+    pub if_epoch: Option<Epoch>,
 }
 
 /// What the Write coordinator gets back from [`Document::prepare`].
@@ -388,6 +409,8 @@ pub enum Rejected {
     Op(String),
     /// Encrypting or committing failed.
     Failed,
+    /// The document's key epoch kept moving between encryption and commit, past the retry limit.
+    Stale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,6 +530,8 @@ impl<O> std::fmt::Debug for Work<O> {
 
 /// A change made on the live document, waiting for its commit.
 struct Built<O> {
+    /// The change's bytes, which an encryption that has to be repeated is made from again.
+    bytes: Vec<u8>,
     /// The frontier row the commit carries, if the document was in a state to publish.
     frontier: Option<FrontierRow>,
     /// The closure's output; `None` for an ingest, which has no closure.
@@ -527,12 +552,15 @@ enum Writes<O> {
         call: CallId,
         ticket: Ticket,
         built: Built<O>,
+        /// Encryptions repeated so far because the commit found its epoch stale.
+        attempts: u32,
     },
     Committing {
         call: CallId,
         ticket: Ticket,
         token: u64,
         built: Built<O>,
+        attempts: u32,
     },
     /// Prepared for `plan`. The change is already in the live document.
     HeldForPlan {
@@ -582,6 +610,8 @@ pub(crate) enum Plant {
     /// A local commit is taken to have applied everything below its revision, without the
     /// check against the revision the tree had before it (laws 1 and 5).
     TrustLandedRev,
+    /// A commit found stale is applied as if it had landed (law 7).
+    ApplyOnStale,
     /// The frontier is published while a write is in flight, so its heads include a change that
     /// is not committed (law 1).
     PublishDuringWrite,
