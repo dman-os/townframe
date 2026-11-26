@@ -29,6 +29,11 @@ future_form.workspace = true
 ed25519-dalek = { workspace = true, optional = true }
 thiserror.workspace = true
 
+# keyline's crypto stack draws randomness through getrandom 0.2 (rand 0.8), whose browser backend
+# is its `js` feature; without it the crate does not compile for `wasm32-unknown-unknown`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 keyline = { version = "0.4.0", features = ["test_utils"] }
 keyline_memory = { version = "0.4.0", features = ["test_utils"] }

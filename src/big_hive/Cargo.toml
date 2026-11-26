@@ -1,0 +1,38 @@
+[package]
+name = "big_hive"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+sqlite_rs.workspace = true
+keyline_sqlite = { path = "../keyline_sqlite" }
+
+# This crate runs on the newer keyhive and subduction forks (branch `townframe-changes`), not on
+# the workspace's `keyhive_*` / `subduction_*` pins, which stay on the older revisions for
+# `big_repo`. The workspace root's `[patch.crates-io]` points keyhive's registry names at the same
+# keyhive rev, so `keyline_sqlite` and subduction's own registry-named keyhive dependencies resolve
+# to the very crates declared here.
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd", default-features = false, features = ["std"] }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd", default-features = false, features = ["std"] }
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd", default-features = false, features = ["std"] }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
+automerge = "0.12.0"
+future_form.workspace = true
+
+# The browser backend of each getrandom major in the graph is a feature that only the final build
+# can turn on: 0.2 (keyhive's rand 0.8) `js`, 0.3 and 0.4 `wasm_js`. Without them the crate does
+# not compile for `wasm32-unknown-unknown`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { workspace = true, features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }

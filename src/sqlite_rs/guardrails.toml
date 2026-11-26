@@ -8,6 +8,10 @@ allow_external_api_types = false
 
 [builds.wasm32-wasip3]
 
+# Only the portable trait surface (`SqliteDb`, rows, values) compiles for the browser; there is no
+# browser database backend yet.
+[builds.wasm32-unknown-unknown]
+
 [[exemptions]]
 code = "ERROR_SHARED_ASYNC_STATE"
 path = "src/sqlite_rs/native.rs"
