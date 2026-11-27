@@ -132,6 +132,7 @@ use sedimentree_core::depth::DepthMetric;
 use sedimentree_core::fragment::Fragment;
 use sedimentree_core::id::SedimentreeId;
 use sedimentree_core::loose_commit::LooseCommit;
+use sqlite_rs::SqlError;
 use sqlite_rs::SqliteDb;
 use tokio::sync::mpsc;
 
@@ -338,12 +339,9 @@ impl Fault {
         let source = source.into();
         let mut link: Option<&(dyn Error + 'static)> = Some(&*source);
         while let Some(error) = link {
-            let text = error.to_string();
-            // `sqlite_rs` has no typed busy error: SQLITE_BUSY and SQLITE_LOCKED reach us as
-            // SQLite's own message.
             assert!(
-                !text.contains("database is locked") && !text.contains("database table is locked"),
-                "write contention at {stage:?}: a second writer exists on the hive's database: {text}"
+                !matches!(error.downcast_ref::<SqlError>(), Some(SqlError::Busy(_))),
+                "write contention at {stage:?}: a second writer exists on the hive's database: {error}"
             );
             link = error.source();
         }
