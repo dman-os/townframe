@@ -212,6 +212,9 @@ fn every_statement_is_served_by_an_index() {
         KeyhiveStore::<Local, Ref>::load_pending_events(s)
             .await
             .unwrap();
+        let read = recording.begin_read().await.unwrap();
+        store.session(&read).doc_epoch(doc).await.unwrap();
+        Recording::end_read(read).await.unwrap();
         // A KEK rotation's statements.
         let rotated = SqliteKeyhiveStore::<Ref, _>::new(
             recording.clone(),
@@ -278,6 +281,10 @@ fn every_statement_is_served_by_an_index() {
             "sqlite_autoindex_kh_cgka_op_1 (doc_id=?)",
         );
         has(queries::CONTENT_HEADS_GET_SQL, "PRIMARY KEY (doc_id=?)");
+        has(
+            queries::DOC_EPOCH_SQL,
+            "SEARCH kh_doc_epoch USING PRIMARY KEY (doc_id=?)",
+        );
         has(
             queries::CONTENT_KEY_GET_SQL,
             "PRIMARY KEY (doc_id=? AND content_ref=?)",

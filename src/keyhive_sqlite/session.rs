@@ -266,6 +266,14 @@ impl<T: ContentRef, E: QueryExecutor> Session<'_, T, E> {
         Ok(count(ops))
     }
 
+    /// The document's key epoch: how many of its CGKA operations the store holds, which only
+    /// grows. 0 for a document with none. A point read of `kh_doc_epoch`, which the insert of
+    /// each operation bumps (a trigger, so an ignored duplicate does not).
+    pub async fn doc_epoch(&self, doc: DocumentId) -> Result<u64, Error> {
+        let epoch = queries::doc_epoch(self.tx, document_bytes(doc)).await?;
+        Ok(epoch.map_or(0, count))
+    }
+
     pub async fn list_individuals(&self) -> Result<Vec<IndividualId>, Error> {
         queries::individuals(self.tx)
             .await?

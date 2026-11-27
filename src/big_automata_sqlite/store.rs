@@ -145,6 +145,13 @@ impl<D: SqliteDb> SqlitePartTx<D> {
         Ok((!stamped.is_empty()).then_some(rev))
     }
 
+    /// The write transaction itself, so the other stores of the database can write through it
+    /// (their `_in` entry points take a transaction the caller owns) and everything commits
+    /// with this transaction's [`commit`](Self::commit) or goes with its rollback.
+    pub fn executor(&self) -> &D::Write {
+        &self.tx
+    }
+
     pub async fn rollback(self) -> Res<()> {
         D::rollback(self.tx).await?;
         Ok(())

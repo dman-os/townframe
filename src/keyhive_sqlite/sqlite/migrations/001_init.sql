@@ -67,6 +67,24 @@ BEGIN
     UPDATE kh_op_count SET ops = ops + 1 WHERE one = 1;
 END;
 
+-- A document's key epoch: how many CGKA operations of the document the store holds, bumped by the
+-- insert of each one (a trigger, like `kh_op_count`, so an `INSERT OR IGNORE` of an operation
+-- already held does not move it, and a rollback takes the bump with it). It is monotone, and moves
+-- whenever the document's group key state can have moved. A writer that encrypted under epoch `e`
+-- and commits in a transaction that still reads `e` knows no operation of the document landed in
+-- between. A document with no operation has no row, which reads as epoch 0.
+CREATE TABLE kh_doc_epoch (
+      doc_id BLOB PRIMARY KEY CHECK (length(doc_id) = 32)
+    , epoch INTEGER NOT NULL CHECK (epoch >= 1)
+) STRICT, WITHOUT ROWID;
+
+CREATE TRIGGER kh_cgka_op_epoch AFTER INSERT ON kh_cgka_op
+BEGIN
+    INSERT INTO kh_doc_epoch (doc_id, epoch)
+    VALUES (NEW.doc_id, 1)
+        ON CONFLICT (doc_id) DO UPDATE SET epoch = epoch + 1;
+END;
+
 -- The dependency graph of a document's operations: one row per (operation, predecessor), copied out
 -- of the operation by the insert that adds it. A predecessor need not be held: an operation can
 -- arrive before the ones it names.

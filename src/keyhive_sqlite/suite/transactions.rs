@@ -16,11 +16,12 @@ use super::Store;
 use super::content_key;
 use super::fresh_store;
 
-const TABLES: [&str; 8] = [
+const TABLES: [&str; 9] = [
     "kh_dek",
     "kh_key_pair",
     "kh_prekey_op",
     "kh_cgka_op",
+    "kh_doc_epoch",
     "kh_cgka_op_pred",
     "kh_content_heads",
     "kh_content_key",
@@ -195,4 +196,81 @@ fn a_failed_write_through_the_trait_leaves_nothing() {
             .unwrap();
         assert_eq!(deks, 0);
     });
+}
+
+#[test]
+fn a_documents_epoch_counts_the_operations_it_holds_and_only_what_commits() {
+    block_on(async {
+        let (db, store) = fresh_store();
+        let pool = &*POOL;
+        let ops_of = |doc: usize| -> Vec<_> {
+            pool.cgka_ops
+                .iter()
+                .filter(|(d, _)| *d == doc)
+                .map(|(_, op)| Arc::clone(op))
+                .collect()
+        };
+        let (zero, one) = (ops_of(0), ops_of(1));
+        assert!(zero.len() >= 2 && !one.is_empty());
+
+        let tx = db.begin_write().await.unwrap();
+        assert_eq!(
+            epoch_of(&store, &tx, pool.docs[0]).await,
+            0,
+            "no operation, epoch 0"
+        );
+        store
+            .session(&tx)
+            .append_cgka_ops(pool.docs[0], &zero[..1])
+            .await
+            .unwrap();
+        assert_eq!(epoch_of(&store, &tx, pool.docs[0]).await, 1);
+        // An operation already held is ignored by the insert, and so does not move the epoch.
+        store
+            .session(&tx)
+            .append_cgka_ops(pool.docs[0], &zero[..1])
+            .await
+            .unwrap();
+        assert_eq!(epoch_of(&store, &tx, pool.docs[0]).await, 1);
+        store
+            .session(&tx)
+            .append_cgka_ops(pool.docs[0], &zero[1..])
+            .await
+            .unwrap();
+        assert_eq!(epoch_of(&store, &tx, pool.docs[0]).await, zero.len() as u64);
+        assert_eq!(
+            epoch_of(&store, &tx, pool.docs[1]).await,
+            0,
+            "another document's epoch is its own"
+        );
+        Database::rollback(tx).await.unwrap();
+
+        // The rollback took the bumps with it.
+        let snapshot = db.begin_read().await.unwrap();
+        assert_eq!(epoch_of(&store, &snapshot, pool.docs[0]).await, 0);
+        Database::end_read(snapshot).await.unwrap();
+
+        let tx = db.begin_write().await.unwrap();
+        store
+            .session(&tx)
+            .append_cgka_ops(pool.docs[1], &one)
+            .await
+            .unwrap();
+        Database::commit(tx).await.unwrap();
+        let snapshot = db.begin_read().await.unwrap();
+        assert_eq!(
+            epoch_of(&store, &snapshot, pool.docs[1]).await,
+            one.len() as u64
+        );
+        assert_eq!(epoch_of(&store, &snapshot, pool.docs[0]).await, 0);
+        Database::end_read(snapshot).await.unwrap();
+    });
+}
+
+async fn epoch_of(
+    store: &Store,
+    tx: &impl QueryExecutor,
+    doc: keyhive_core::principal::document::id::DocumentId,
+) -> u64 {
+    store.session(tx).doc_epoch(doc).await.unwrap()
 }

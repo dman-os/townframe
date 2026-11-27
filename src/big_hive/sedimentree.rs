@@ -49,7 +49,7 @@ mod tree;
 mod write;
 
 #[cfg(test)]
-mod suite;
+pub(crate) mod suite;
 
 use std::sync::Arc;
 
