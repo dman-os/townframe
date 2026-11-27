@@ -52,10 +52,8 @@ mod wit {
 use crate::wit::townframe::sqlite::types as sqlite_types;
 sqlite_rs::impl_wit_sqlite_backend!(
     crate::wit::townframe::sqlite::sqlite_connection::Connection,
-    sqlite_types,
-);
-sqlite_rs::impl_wit_sqlite_backend!(
     crate::wit::townframe::sqlite::sqlite_connection::Transaction,
+    crate::wit::townframe::sqlite::sqlite_connection::ReadTransaction,
     sqlite_types,
 );
 

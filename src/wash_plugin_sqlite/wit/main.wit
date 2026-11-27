@@ -4,6 +4,8 @@ interface types {
   variant query-error {
     invalid-params(string),
     invalid-query(string),
+    /// The database is locked by another connection (`SQLITE_BUSY`, `SQLITE_LOCKED`); retrying may succeed.
+    busy(string),
     unexpected(string),
   }
 
@@ -38,12 +40,24 @@ interface sqlite-connection {
     rollback: async func() -> result<_, query-error>;
   }
 
+  /// A read snapshot: every query sees the database as of the moment it began, whatever
+  /// commits meanwhile, and nothing can be written through it. Holding one keeps the
+  /// snapshot open, so end it promptly; a host whose database has a single connection may make
+  /// a writer wait for it.
+  resource read-transaction {
+    query: async func(query: string, params: list<sql-value>) -> result<result-set, query-error>;
+    /// Release the snapshot. Dropping the resource releases it too.
+    end: async func() -> result<_, query-error>;
+  }
+
   resource connection {
     query: async func(query: string, params: list<sql-value>) -> result<result-set, query-error>;
     execute: async func(query: string, params: list<sql-value>) -> result<execute-result, query-error>;
     execute-batch: async func(query: string) -> result<execute-result, query-error>;
     sqlite-file-path: func() -> string;
     begin-transaction: async func() -> result<transaction, query-error>;
+    /// Begin a read snapshot. It is pinned here, not at its first query.
+    begin-read-transaction: async func() -> result<read-transaction, query-error>;
   }
 }
 

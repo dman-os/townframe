@@ -1,28 +1,55 @@
 //! Portable SQLite runtime shared by native callers and the
 //! `townframe:sqlite` WASI host.
 //!
-//! Three things that `sqlx`/`SqlCtx` fuse together are deliberately
+//! Four things that `sqlx`/`SqlCtx` fuse together are deliberately
 //! separated here:
 //!
 //! ```text
 //! Database handle  (cheap, lazy: no thread, no connection)
 //!        |
-//! SqliteRuntime    (one per process: bounded shared workers + eviction)
+//! SqliteRuntime    (one per process: idle eviction, and the executor)
+//!        |
+//! Executor         (where a statement runs: `Pool` workers or `Inline`; see exec.rs)
 //!        |
 //! Connections      (opened on first use, leased per op/tx, evicted idle)
 //! ```
 //!
 //! A `Database` handle is just configuration: creating one must not pay
 //! the per-database pool/thread cost noted in `daybook_core::local_state`.
-//! Execution happens on the runtime's shared blocking workers; connections
-//! exist only while a database is in use, plus an idle grace period.
+//! Connections exist only while a database is in use, plus an idle grace period.
 //!
 //! Concurrency model (WAL): one write connection per database leased
 //! exclusively (at most one writer / one write transaction per database),
-//! up to `max_readers_per_db` read connections leased per operation. A
-//! transaction leases its *connection* for its whole lifetime, never a
-//! worker thread: each statement is dispatched to the shared pool and the
-//! connection sits thread-free between statements.
+//! up to `max_readers_per_db` read connections leased per operation. The
+//! leases are handed out by a small waker-queue gate (gate.rs) that belongs to
+//! no async runtime. A transaction leases its *connection* for its whole
+//! lifetime, never a thread.
+//!
+//! # Choosing the executor
+//!
+//! `RuntimeConfig::execution` picks how statements run, and everything else in this
+//! module behaves the same under both.
+//!
+//! - `Execution::Pool` (the default) dispatches each statement to the shared
+//!   worker threads and awaits the reply; the connection sits thread-free
+//!   between statements. Pick it for a multi-threaded host, where a statement
+//!   must not block an executor thread.
+//! - `Execution::Inline` calls SQLite on the polling thread. Its statement
+//!   futures are ready on the first poll, so a statement costs no queue hop, no
+//!   reply channel and no copy of the SQL text. Pick it for a single-threaded
+//!   host (a current-thread runtime, or a test) where a hop only adds cost.
+//!   It runs no background tasks: idle connections are closed when a lease is
+//!   taken. A statement blocks its thread for as long as SQLite takes.
+//!
+//! Under either executor a write transaction holds the database's writer until it
+//! ends, so an `.await` on anything but the transaction's own statements keeps every other
+//! writer waiting. Under `Inline` the waiting writers are other tasks of the same thread
+//! and nothing runs them while the holder is stuck on something that depends on them.
+//! `SqliteDb::write` scopes a transaction to a closure to make that easy to avoid.
+//!
+//! A single-threaded run of an existing suite is one environment variable away:
+//! `SQLITE_RS_EXECUTION=inline cargo nextest run -p keyline_sqlite` makes the suites that
+//! build their runtime through `test_support::execution()` use `Inline`.
 //!
 //! # Boot, embedded migrations, and raw SQL
 //!
@@ -58,7 +85,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Defaults: four workers, two readers per database, 30-second idle eviction,
+//! Defaults: the `Pool` executor with four workers, two readers per database, 30-second idle eviction,
 //! an 8000-KiB page-cache budget and 64 cached statements per connection. Clones of
 //! a `Database` share its pools; register each database once at boot and clone that
 //! handle. Handles keep the runtime alive. `ephemeral()` returns a file-backed test
@@ -213,11 +240,18 @@
 //! `--dry-run` reports the pending plan without executing migration SQL. It is not
 //! a rehearsal of writes against the live database.
 
+mod exec;
+mod gate;
 mod migrations;
 mod transaction;
 pub(super) use crate::query::Executor;
 pub(super) use crate::query::IntoParams;
 pub(super) use crate::query::QueryExecutor;
+use exec::Exec;
+pub use exec::Execution;
+use exec::StatementFn;
+use gate::Gate;
+use gate::Permit;
 pub use migrations::MigrationState;
 pub use migrations::migration_status;
 pub use migrations::run_migrations;
@@ -226,7 +260,6 @@ pub use transaction::ReadTx;
 pub use transaction::Savepoint;
 pub use transaction::Tx;
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -239,8 +272,6 @@ use color_eyre::eyre::Result as Res;
 use color_eyre::eyre::WrapErr;
 use rusqlite::Connection as RusConnection;
 use tokio::sync::Mutex;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
 use utils_rs::expect_tags::ERROR_CHANNEL;
 use utils_rs::expect_tags::ERROR_MUTEX;
@@ -260,6 +291,14 @@ impl From<rusqlite::Error> for SqlError {
     fn from(err: rusqlite::Error) -> Self {
         use rusqlite::Error::*;
         match &err {
+            SqliteFailure(failure, _)
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                SqlError::Busy(err.to_string())
+            }
             InvalidParameterCount(..)
             | InvalidParameterName(_)
             | InvalidColumnType(..)
@@ -277,6 +316,9 @@ impl From<rusqlite::Error> for SqlError {
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
+    /// How statements run. See [`Execution`].
+    pub execution: Execution,
+    /// Worker threads of `Execution::Pool`; ignored by `Inline`.
     pub workers: usize,
     pub max_readers_per_db: usize,
     pub idle_timeout: Duration,
@@ -287,6 +329,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            execution: Execution::Pool,
             workers: 4,
             max_readers_per_db: 2,
             idle_timeout: Duration::from_secs(30),
@@ -299,29 +342,56 @@ impl Default for RuntimeConfig {
 pub use crate::portable::Migration;
 
 // ---------------------------------------------------------------------------
-// Worker pool
+// Runtime state and instrumentation
 // ---------------------------------------------------------------------------
 
-type Job = Box<dyn FnOnce() + Send>;
-
 /// INSTR: process-wide SQLite counters: write leases, read leases, write-gate wait ns, worker jobs, worker busy ns.
-pub static INSTR_SQL: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5]; // INSTR
+pub static INSTR_SQL: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5]; // INSTR
 /// INSTR: every 16th lease's caller (first frames outside sqlite_rs, tokio, std and futures), counted by (write, frames).
-pub static INSTR_SQL_CALLERS: StdMutex<Option<std::collections::HashMap<String, u64>>> = StdMutex::new(None); // INSTR
-fn instr_sample_caller(write: bool) { // INSTR
+pub static INSTR_SQL_CALLERS: StdMutex<Option<std::collections::HashMap<String, u64>>> =
+    StdMutex::new(None); // INSTR
+fn instr_sample_caller(write: bool) {
+    // INSTR
     static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
-    if !TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(16) { return; } // INSTR
+    if !TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(16) {
+        return;
+    } // INSTR
     let trace = std::backtrace::Backtrace::force_capture().to_string(); // INSTR
-    let frames: Vec<&str> = trace.lines().map(str::trim).filter(|line| !line.starts_with("at ") && line.contains(": ")).map(|line| line.split_once(": ").unwrap().1).filter(|name| (name.starts_with("big_") || name.starts_with("<big_") || name.starts_with("subduction") || name.starts_with("<subduction") || name.starts_with("keyhive") || name.starts_with("<keyhive") || name.starts_with("service_utils") || name.starts_with("<service_utils")) && !name.contains("{{closure}}{{closure}}{{closure}}")).take(3).collect(); // INSTR
+    let frames: Vec<&str> = trace
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("at ") && line.contains(": "))
+        .map(|line| line.split_once(": ").unwrap().1)
+        .filter(|name| {
+            (name.starts_with("big_")
+                || name.starts_with("<big_")
+                || name.starts_with("subduction")
+                || name.starts_with("<subduction")
+                || name.starts_with("keyhive")
+                || name.starts_with("<keyhive")
+                || name.starts_with("service_utils")
+                || name.starts_with("<service_utils"))
+                && !name.contains("{{closure}}{{closure}}{{closure}}")
+        })
+        .take(3)
+        .collect(); // INSTR
     let key = format!("{} {}", if write { "W" } else { "R" }, frames.join(" <- ")); // INSTR
-    *INSTR_SQL_CALLERS.lock().unwrap().get_or_insert_with(std::collections::HashMap::new).entry(key).or_default() += 1; // INSTR
+    *INSTR_SQL_CALLERS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(std::collections::HashMap::new)
+        .entry(key)
+        .or_default() += 1; // INSTR
 } // INSTR
 
 struct RuntimeInner {
     cfg: RuntimeConfig,
-    tx: std::sync::mpsc::Sender<Job>,
+    exec: Exec,
     open_connections: Arc<AtomicUsize>,
     databases: StdMutex<Vec<std::sync::Weak<DbInner>>>,
+    /// Inline only: when idle connections were last swept (see `evict_idle_databases`).
+    last_sweep: StdMutex<Instant>,
     _eviction_lifetime: oneshot::Sender<()>,
 }
 
@@ -331,64 +401,36 @@ impl RuntimeInner {
         T: Send + 'static,
         F: FnOnce() -> SqlResult<T> + Send + 'static,
     {
-        self.call_on(None, operation).await
+        self.exec.call_on(None, operation).await
     }
 
-    async fn call_on<T, F>(
-        &self,
-        queue: Option<&Arc<transaction::SerialQueue>>,
-        operation: F,
-    ) -> SqlResult<T>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> SqlResult<T> + Send + 'static,
-    {
-        let (reply_tx, reply_rx) = oneshot::channel::<std::thread::Result<SqlResult<T>>>();
-        let job: Job = Box::new(move || {
-            let instr_start = std::time::Instant::now(); // INSTR
-            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
-            INSTR_SQL[3].fetch_add(1, Ordering::Relaxed); // INSTR
-            INSTR_SQL[4].fetch_add(instr_start.elapsed().as_nanos() as u64, Ordering::Relaxed); // INSTR
-            if let Err(Err(payload)) = reply_tx.send(out) {
-                std::panic::resume_unwind(payload);
+    /// Close the idle connections of every database that has been unused for `idle_timeout`.
+    fn evict_idle_databases(&self) {
+        let databases: Vec<Arc<DbInner>> = {
+            let mut registry = self.databases.lock().expect(ERROR_MUTEX);
+            registry.retain(|database| database.strong_count() > 0);
+            registry
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect()
+        };
+        for database in databases {
+            database.evict_if_idle(&self.cfg);
+        }
+    }
+
+    /// `Inline` has no thread to sweep in the background, so it sweeps on the calls it gets, at
+    /// most once per idle interval.
+    fn sweep_if_due(&self) {
+        let interval = self.cfg.idle_timeout.max(Duration::from_millis(50));
+        {
+            let mut last = self.last_sweep.lock().expect(ERROR_MUTEX);
+            if last.elapsed() < interval {
+                return;
             }
-        });
-        match queue {
-            Some(queue) => queue.enqueue(&self.tx, job)?,
-            None => self.tx.send(job).map_err(|_| SqlError::Closed)?,
+            *last = Instant::now();
         }
-        match reply_rx.await.map_err(|_| SqlError::Closed)? {
-            Ok(result) => result,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    }
-
-    async fn drain_workers(&self) {
-        let workers = self.cfg.workers.max(1);
-        let rendezvous = Arc::new(std::sync::Barrier::new(workers));
-        let mut done = Vec::with_capacity(workers);
-        for _ in 0..workers {
-            let (reply, replied) = oneshot::channel();
-            let rendezvous = Arc::clone(&rendezvous);
-            self.tx
-                .send(Box::new(move || {
-                    rendezvous.wait();
-                    reply.send(()).expect("drain_workers receiver dropped");
-                }))
-                .expect("sqlite worker pool closed while its runtime is alive");
-            done.push(replied);
-        }
-        for replied in done {
-            replied.await.expect("sqlite worker dropped a drain job");
-        }
-    }
-
-    #[cfg(test)]
-    fn try_call<F>(&self, operation: F) -> bool
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.tx.send(Box::new(operation)).is_ok()
+        self.evict_idle_databases();
     }
 }
 
@@ -458,9 +500,9 @@ struct DbInner {
     migrations: Vec<Migration<'static>>,
     migration_table: String,
     writer: StdMutex<Option<ConnSlot>>,
-    writer_gate: Arc<Semaphore>,
+    writer_gate: Arc<Gate>,
     readers: StdMutex<Vec<ConnSlot>>,
-    reader_gate: Arc<Semaphore>,
+    reader_gate: Arc<Gate>,
     in_use: AtomicUsize,
     last_used: StdMutex<Instant>,
     initialized: StdMutex<bool>,
@@ -489,14 +531,18 @@ impl std::fmt::Debug for Database {
 
 pub(crate) struct Lease {
     slot: Option<ConnSlot>,
-    _permit: OwnedSemaphorePermit,
+    _permit: Permit,
     db: Arc<DbInner>,
     write: bool,
 }
 
 impl Lease {
+    fn connection(&self) -> &Arc<StdMutex<RusConnection>> {
+        &self.slot.as_ref().expect("lease slot present").conn
+    }
+
     fn slot(&self) -> Arc<StdMutex<RusConnection>> {
-        Arc::clone(&self.slot.as_ref().expect("lease slot present").conn)
+        Arc::clone(self.connection())
     }
 }
 
@@ -547,6 +593,9 @@ impl Database {
     }
 
     async fn lease(&self, write: bool) -> SqlResult<Lease> {
+        if self.runtime.exec.is_inline() {
+            self.runtime.sweep_if_due();
+        }
         self.ensure_initialized().await?;
         self.lease_inner(write).await
     }
@@ -559,9 +608,11 @@ impl Database {
         };
         instr_sample_caller(write); // INSTR
         let instr_start = std::time::Instant::now(); // INSTR
-        let permit = gate.acquire_owned().await.map_err(|_| SqlError::Closed)?;
+        let permit = gate.acquire().await;
         INSTR_SQL[usize::from(!write)].fetch_add(1, Ordering::Relaxed); // INSTR
-        if write { INSTR_SQL[2].fetch_add(instr_start.elapsed().as_nanos() as u64, Ordering::Relaxed); } // INSTR
+        if write {
+            INSTR_SQL[2].fetch_add(instr_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        } // INSTR
         self.drain_overflow();
         self.inner.in_use.fetch_add(1, Ordering::SeqCst);
         let mut lease = Lease {
@@ -626,25 +677,65 @@ impl Database {
             .await
     }
 
+    /// Run one statement on a leased connection and release the lease. `Inline` lends the
+    /// caller's text and parameters to the statement; `Pool` copies the text, moves the
+    /// parameters to a worker, and lets the job own the lease, so a cancelled caller still
+    /// leaves the connection busy until the worker is done with it.
+    async fn run_statement<T: Send + 'static>(
+        &self,
+        write: bool,
+        sql: &str,
+        params: Vec<SqlValue>,
+        statement: StatementFn<T>,
+    ) -> SqlResult<T> {
+        let lease = self.lease(write).await?;
+        if self.runtime.exec.is_inline() {
+            let result = statement(
+                &mut lease.connection().lock().expect(ERROR_MUTEX),
+                sql,
+                &params,
+            );
+            drop(lease);
+            return result;
+        }
+        let connection = lease.slot();
+        let sql = sql.to_owned();
+        self.runtime
+            .call(move || {
+                let mut conn = connection.lock().expect(ERROR_MUTEX);
+                let result = statement(&mut conn, &sql, &params);
+                drop(conn);
+                drop(connection);
+                drop(lease);
+                result
+            })
+            .await
+    }
+
     /// Run a read query. Uses a reader connection (WAL: concurrent with
     /// the writer).
     pub async fn query(&self, sql: &str, params: impl IntoParams) -> SqlResult<ResultSet> {
-        let sql = sql.to_string();
-        let params = params.into_params();
-        self.run(false, move |conn| run_read_query(conn, &sql, &params))
+        self.run_statement(false, sql, params.into_params(), run_read_query)
             .await
     }
 
     /// Execute a statement. Uses the (single) writer connection.
     pub async fn execute(&self, sql: &str, params: impl IntoParams) -> SqlResult<ExecuteResult> {
-        let sql = sql.to_string();
-        let params = params.into_params();
-        self.run(true, move |conn| run_execute(conn, &sql, &params))
+        self.run_statement(true, sql, params.into_params(), run_execute)
             .await
     }
 
+    /// Whether a read snapshot can be open while a write transaction is: true here, where the
+    /// writer and each reader are separate WAL connections. A single-connection backend (a
+    /// browser, or a guest whose host cannot promise it) says false: there, a snapshot held
+    /// by a task that then waits for the writer is a deadlock, so keep snapshots short and
+    /// never open one first.
+    pub fn supports_concurrent_readers(&self) -> bool {
+        true
+    }
+
     /// Resolves once every job queued before this call has finished on the
-    /// workers.
+    /// workers. Returns at once on an `Inline` runtime, which has none.
     ///
     /// A statement cancelled by its caller (an aborted task, a dropped
     /// future) still runs to completion on a worker, and its closure owns the
@@ -654,22 +745,13 @@ impl Database {
     /// deterministic. It parks one rendezvous job per worker, which can only
     /// all start once each worker is done with whatever it held before.
     pub async fn drain_workers(&self) {
-        self.runtime.drain_workers().await;
+        self.runtime.exec.drain(self.runtime.cfg.workers).await;
     }
 
     /// Execute a batch of statements with no parameters (DDL, pragmas).
     pub async fn execute_batch(&self, sql: &str) -> SqlResult<ExecuteResult> {
-        let sql = sql.to_string();
-        self.run(true, move |conn| {
-            let changes_before = conn.total_changes();
-            conn.execute_batch(&sql).map_err(SqlError::from)?;
-            Ok(ExecuteResult {
-                rows_affected: conn.total_changes() - changes_before,
-                last_insert_rowid: conn.last_insert_rowid(),
-                result_set: ResultSet::default(),
-            })
-        })
-        .await
+        self.run_statement(true, sql, Vec::new(), run_execute_batch)
+            .await
     }
 
     pub async fn begin_write(&self) -> SqlResult<Tx> {
@@ -684,7 +766,7 @@ impl Database {
         let transaction = Tx {
             db: self.clone(),
             lease: Some(self.lease(write).await?),
-            queue: Arc::new(transaction::SerialQueue::default()),
+            queue: (!self.runtime.exec.is_inline()).then(Arc::default),
             next_savepoint: 0,
         };
         transaction
@@ -766,22 +848,27 @@ impl Database {
 
     /// Close this database's idle connections now, if unused.
     pub async fn evict_idle(&self) {
-        let Ok(_writer) = self.inner.writer_gate.try_acquire() else {
+        self.inner.evict_if_idle(&self.runtime.cfg);
+    }
+}
+
+impl DbInner {
+    /// Close the connections of a database that nothing holds and nothing has used for
+    /// `idle_timeout`. A held or contended gate means "in use": the check does not wait.
+    fn evict_if_idle(&self, cfg: &RuntimeConfig) {
+        let Some(_writer) = self.writer_gate.try_acquire(1) else {
             return;
         };
-        let readers = u32::try_from(self.runtime.cfg.max_readers_per_db.max(1))
-            .expect("reader budget fits u32");
-        let Ok(_readers) = self.inner.reader_gate.try_acquire_many(readers) else {
+        let Some(_readers) = self.reader_gate.try_acquire(cfg.max_readers_per_db.max(1)) else {
             return;
         };
-        let idle_for = self.inner.last_used.lock().expect(ERROR_MUTEX).elapsed();
-        if idle_for < self.runtime.cfg.idle_timeout {
+        if self.last_used.lock().expect(ERROR_MUTEX).elapsed() < cfg.idle_timeout {
             return;
         }
-        self.inner.overflow.lock().expect(ERROR_MUTEX).clear();
-        *self.inner.writer.lock().expect(ERROR_MUTEX) = None;
-        self.inner.readers.lock().expect(ERROR_MUTEX).clear();
-        *self.inner.initialized.lock().expect(ERROR_MUTEX) = false;
+        self.overflow.lock().expect(ERROR_MUTEX).clear();
+        *self.writer.lock().expect(ERROR_MUTEX) = None;
+        self.readers.lock().expect(ERROR_MUTEX).clear();
+        *self.initialized.lock().expect(ERROR_MUTEX) = false;
     }
 }
 
@@ -796,40 +883,49 @@ pub struct SqliteRuntime {
 
 impl SqliteRuntime {
     pub fn new(cfg: RuntimeConfig) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Job>();
-        let rx = Arc::new(StdMutex::new(rx));
         let mut workers = Vec::new();
-        for worker_index in 0..cfg.workers.max(1) {
-            let rx = Arc::clone(&rx);
-            workers.push(
-                std::thread::Builder::new()
-                    .name(format!("sqlite-rs-{worker_index}"))
-                    .spawn(move || {
-                        loop {
-                            let job = {
-                                let guard = rx.lock().expect(ERROR_MUTEX);
-                                guard.recv()
-                            };
-                            match job {
-                                Ok(job) => job(),
-                                Err(_) => return,
-                            }
-                        }
-                    })
-                    .expect("failed spawning sqlite worker thread"),
-            );
-        }
+        let exec = match cfg.execution {
+            Execution::Pool => {
+                let (tx, rx) = std::sync::mpsc::channel::<exec::Job>();
+                let rx = Arc::new(StdMutex::new(rx));
+                for worker_index in 0..cfg.workers.max(1) {
+                    let rx = Arc::clone(&rx);
+                    workers.push(
+                        std::thread::Builder::new()
+                            .name(format!("sqlite-rs-{worker_index}"))
+                            .spawn(move || {
+                                loop {
+                                    let job = {
+                                        let guard = rx.lock().expect(ERROR_MUTEX);
+                                        guard.recv()
+                                    };
+                                    match job {
+                                        Ok(job) => job(),
+                                        Err(_) => return,
+                                    }
+                                }
+                            })
+                            .expect("failed spawning sqlite worker thread"),
+                    );
+                }
+                Exec::Pool(tx)
+            }
+            Execution::Inline => Exec::Inline,
+        };
         let (eviction_lifetime, mut eviction_stopped) = oneshot::channel();
         let inner = Arc::new(RuntimeInner {
             cfg,
-            tx,
+            exec,
             open_connections: Arc::new(AtomicUsize::new(0)),
             databases: StdMutex::new(Vec::new()),
+            last_sweep: StdMutex::new(Instant::now()),
             _eviction_lifetime: eviction_lifetime,
         });
-        // Idle eviction: one task per runtime (not per database), and
-        // only where a tokio runtime already exists.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // Idle eviction on a pool: one task per runtime (not per database), and only where a
+        // tokio runtime already exists. `Inline` sweeps when a lease is taken instead.
+        if !inner.exec.is_inline()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
             let idle_interval = inner.cfg.idle_timeout.max(Duration::from_millis(50));
             let weak_inner = Arc::downgrade(&inner);
             handle.spawn(async move {
@@ -843,19 +939,7 @@ impl SqliteRuntime {
                     let Some(inner) = weak_inner.upgrade() else {
                         break;
                     };
-                    let dbs: Vec<Arc<DbInner>> = {
-                        let mut reg = inner.databases.lock().expect(ERROR_MUTEX);
-                        reg.retain(|database| database.strong_count() > 0);
-                        reg.iter().filter_map(std::sync::Weak::upgrade).collect()
-                    };
-                    for db in dbs {
-                        Database {
-                            runtime: Arc::clone(&inner),
-                            inner: db,
-                        }
-                        .evict_idle()
-                        .await;
-                    }
+                    inner.evict_idle_databases();
                 }
             });
         }
@@ -887,9 +971,9 @@ impl SqliteRuntime {
             migrations: migrations.to_vec(),
             migration_table: migration_table.to_string(),
             writer: StdMutex::new(None),
-            writer_gate: Arc::new(Semaphore::new(1)),
+            writer_gate: Gate::new(1),
             readers: StdMutex::new(Vec::new()),
-            reader_gate: Arc::new(Semaphore::new(self.inner.cfg.max_readers_per_db.max(1))),
+            reader_gate: Gate::new(self.inner.cfg.max_readers_per_db.max(1)),
             in_use: AtomicUsize::new(0),
             last_used: StdMutex::new(Instant::now()),
             initialized: StdMutex::new(false),
@@ -934,7 +1018,11 @@ impl SqliteRuntime {
     /// See [`Database::drain_workers`]; this is the same barrier for a
     /// holder of the runtime handle.
     pub async fn drain_workers(&self) {
-        self.inner.drain_workers().await;
+        self.inner.exec.drain(self.inner.cfg.workers).await;
+    }
+
+    pub fn execution(&self) -> Execution {
+        self.inner.cfg.execution
     }
 
     pub fn open_connection_count(&self) -> usize {
@@ -1074,6 +1162,20 @@ fn run_statement(
     Ok(ResultSet { columns, rows })
 }
 
+fn run_execute_batch(
+    conn: &mut RusConnection,
+    sql: &str,
+    _params: &[SqlValue],
+) -> SqlResult<ExecuteResult> {
+    let changes_before = conn.total_changes();
+    conn.execute_batch(sql).map_err(SqlError::from)?;
+    Ok(ExecuteResult {
+        rows_affected: conn.total_changes() - changes_before,
+        last_insert_rowid: conn.last_insert_rowid(),
+        result_set: ResultSet::default(),
+    })
+}
+
 fn run_execute(
     conn: &mut RusConnection,
     sql: &str,
@@ -1120,8 +1222,24 @@ pub mod test_support {
         }
     }
 
+    /// The executor tests run under: `Pool` unless `SQLITE_RS_EXECUTION=inline` is set. Suites of
+    /// crates built on `SqliteDb` read it to build their runtime, so one environment variable runs
+    /// the same suite over either executor.
+    pub fn execution() -> Execution {
+        match std::env::var("SQLITE_RS_EXECUTION").as_deref() {
+            Err(_) | Ok("pool") => Execution::Pool,
+            Ok("inline") => Execution::Inline,
+            Ok(other) => panic!("SQLITE_RS_EXECUTION must be pool or inline, got {other:?}"),
+        }
+    }
+
     pub fn db(migrations: &[Migration<'static>]) -> Res<TestDb> {
+        db_on(execution(), migrations)
+    }
+
+    pub fn db_on(execution: Execution, migrations: &[Migration<'static>]) -> Res<TestDb> {
         let runtime = SqliteRuntime::new(RuntimeConfig {
+            execution,
             workers: 2,
             ..Default::default()
         });

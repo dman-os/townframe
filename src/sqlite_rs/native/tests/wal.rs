@@ -54,3 +54,20 @@ fn concurrent_openers_converge_on_wal_without_failing_busy() {
         .expect("journal mode");
     assert_eq!(mode, "wal");
 }
+
+/// Contention is told apart by SQLite's result code, never by the wording of its message.
+#[test]
+fn busy_and_locked_result_codes_are_a_typed_busy_error() {
+    for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+        let error = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+        assert!(matches!(SqlError::from(error), SqlError::Busy(_)), "{code}");
+    }
+    let constraint = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some("database is locked".into()),
+    );
+    assert!(
+        matches!(SqlError::from(constraint), SqlError::InvalidQuery(_)),
+        "a message that says locked is not contention"
+    );
+}

@@ -208,6 +208,10 @@ pub enum SqlError {
     NoRows,
     #[error("query returned more than one row")]
     TooManyRows,
+    /// Another connection holds the lock this statement needs: `SQLITE_BUSY` or `SQLITE_LOCKED`,
+    /// taken from the result code, never the message. Retrying the transaction may succeed.
+    #[error("database busy: {0}")]
+    Busy(String),
     #[error("sqlite runtime closed")]
     Closed,
     #[error("{0}")]

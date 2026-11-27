@@ -39,6 +39,7 @@ pub(crate) type Store = SqliteKeyhiveStore<Ref, Database>;
 
 pub(crate) static RUNTIME: LazyLock<SqliteRuntime> = LazyLock::new(|| {
     SqliteRuntime::new(RuntimeConfig {
+        execution: sqlite_rs::test_support::execution(),
         workers: 2,
         ..RuntimeConfig::default()
     })
