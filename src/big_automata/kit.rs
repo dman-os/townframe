@@ -12,17 +12,8 @@ pub type Instant = web_time::Instant;
 /// web-safe [`Instant`].
 pub type Clock = std::sync::Arc<dyn Fn() -> Instant + Send + Sync>;
 
-// The durable outbox queues, replaces, cancels and reaps tasks through the keyed scheduler, but
-// nothing yet retries a failed task, parks a key or ticks delayed tasks through it: its own
-// backoff lives in the outbox machine. That half of the scheduler (the backoff, delayed queue,
-// `fail`, `park`/`wake`) is driven by its tests alone, so it is dead in a lib build. The
-// expectation turns into a warning the moment a consumer uses all of it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "retry, backoff and parking have no consumer outside the scheduler's tests yet"
-    )
-)]
-pub(crate) mod scheduler;
-pub(crate) mod watermark;
+/// Keyed task scheduling with backoff and parking. Public for the machines of other crates that
+/// keep one task per key (the Hub's catch-up of documents).
+pub mod scheduler;
+/// A stream cursor that only advances past settled jobs.
+pub mod watermark;

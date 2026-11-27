@@ -53,6 +53,14 @@ impl<O> Document<O> {
         }
     }
 
+    /// Whether a readable document still has remote content or a frontier to bring up to date,
+    /// or a frontier row in flight that has not landed: what the Hub's catch-up waits on. A
+    /// parked or blocked document does not (see [`Document::missing`]).
+    pub fn catching_up(&self) -> bool {
+        self.readable
+            && (self.has_catch_up() || matches!(self.frontier, Frontier::Publishing { .. }))
+    }
+
     fn has_catch_up(&self) -> bool {
         if !self.readable {
             return false;

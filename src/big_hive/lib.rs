@@ -12,6 +12,7 @@
 pub mod coordinator;
 pub mod document;
 pub mod executor;
+pub mod hub;
 pub mod keyhive_boundary;
 pub mod sedimentree;
 
