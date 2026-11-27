@@ -20,18 +20,15 @@
 //! which the embedder's spawn surfaces: a store error crashes it (law 15), a fetch error is
 //! logged by [`OutboxBackend`]'s caller side and becomes a failed call.
 
-use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use futures::FutureExt;
-use futures::StreamExt;
-use futures::future::AbortHandle;
-use futures::future::AbortRegistration;
-use futures::future::Abortable;
-use futures::stream::FuturesUnordered;
+use futures::future::Either;
 
-use crate::Clock;
 use crate::interlude::*;
+use crate::kit::Clock;
+use crate::kit::calls::Aborts;
+use crate::kit::calls::Event;
+use crate::kit::calls::Pool;
 use crate::okv::OkvStore;
 use crate::okv::Selector;
 use crate::rev::Limits;
@@ -153,21 +150,13 @@ enum Done {
     },
 }
 
-enum Event {
-    Input(Option<Input>),
-    Done(Done),
-    /// The page the stream filled.
-    Page,
-    Timer,
-}
-
 struct Driver<S, B> {
     config: DriverConfig,
     clock: Clock,
     store: S,
     backend: Arc<B>,
     machine: Outbox,
-    aborts: BTreeMap<CallId, AbortHandle>,
+    aborts: Aborts<CallId>,
 }
 
 impl<S, B> Driver<S, B>
@@ -189,41 +178,16 @@ where
         let mut stream = RevStream::new(self.store.clone(), Selector::All, 0);
         let mut page = Page::default();
         let mut pruned_at = 0;
-        let mut calls = FuturesUnordered::new();
+        let mut calls = Pool::default();
         loop {
             calls.extend(self.flush());
             let due = self.machine.next_due();
             let now = (self.clock)();
-            let event = {
-                let call = async {
-                    if calls.is_empty() {
-                        std::future::pending().await
-                    } else {
-                        calls.next().await.expect("a non-empty set yields")
-                    }
-                }
-                .fuse();
-                let input = inputs.recv().fuse();
-                // Law 4: always polled; the machine's budgets gate dispatch, not this.
-                let rows = stream.next_into(&mut page, limits).fuse();
-                let timer = async {
-                    match due {
-                        Some(at) => n0_future::time::sleep(at.saturating_duration_since(now)).await,
-                        None => std::future::pending().await,
-                    }
-                }
-                .fuse();
-                futures::pin_mut!(call, input, rows, timer);
-                futures::select_biased! {
-                    done = call => Event::Done(done),
-                    input = input => Event::Input(input.ok()),
-                    rows = rows => {
-                        rows.expect("the wants table failed a read");
-                        Event::Page
-                    }
-                    () = timer => Event::Timer,
-                }
-            };
+            // Law 4: the table's arm is always polled; the machine's budgets gate dispatch, not
+            // this.
+            let event = calls
+                .wait(&inputs, stream.next_into(&mut page, limits), now, due)
+                .await;
             match event {
                 Event::Input(Some(Input::Connected(peer))) => self.machine.peer_connected(peer),
                 Event::Input(Some(Input::Disconnected(peer))) => {
@@ -231,7 +195,8 @@ where
                 }
                 Event::Input(None) => break,
                 Event::Done(done) => self.feed(done),
-                Event::Page => {
+                Event::Extra(rows) => {
+                    rows.expect("the wants table failed a read");
                     self.take_page(&mut page, &mut pruned_at).await;
                 }
                 Event::Timer => {}
@@ -266,9 +231,7 @@ where
         let now = (self.clock)();
         match done {
             Done::Fetch(call, ended) => {
-                self.aborts
-                    .remove(&call)
-                    .expect("a call's outcome is reported once");
+                self.aborts.finish(&call);
                 self.machine.fetch_ended(now, call, ended);
             }
             Done::Land {
@@ -286,57 +249,45 @@ where
         let mut issued = vec![];
         for cmd in cmds {
             match cmd {
-                Command::Cancel { call } => self.aborts[&call].abort(),
+                Command::Cancel { call } => self.aborts.cancel(&call),
                 Command::Fetch { call, job } => {
-                    let (handle, registration) = AbortHandle::new_pair();
-                    self.aborts.insert(call, handle);
-                    issued.push(run_call(
-                        Arc::clone(&self.backend),
-                        Command::Fetch { call, job },
-                        Some(registration),
-                    ));
+                    let backend = Arc::clone(&self.backend);
+                    let fetch = self.aborts.track(
+                        call,
+                        async move {
+                            match backend.fetch(&job).await {
+                                Ok(fetched) => Ended::Fetched(fetched),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        ?error,
+                                        obj = %job.obj,
+                                        "an outbox fetch failed; the machine retries it"
+                                    );
+                                    Ended::Failed
+                                }
+                            }
+                        },
+                        Ended::Cancelled,
+                    );
+                    issued.push(Either::Left(async move { Done::Fetch(call, fetch.await) }));
                 }
-                land @ Command::Land { .. } => {
-                    issued.push(run_call(Arc::clone(&self.backend), land, None));
+                // never tracked: a landing is never cancelled (law 13)
+                Command::Land { obj, version } => {
+                    let backend = Arc::clone(&self.backend);
+                    issued.push(Either::Right(async move {
+                        let deleted = backend
+                            .land(&obj, version)
+                            .await
+                            .expect("the wants table failed a landing");
+                        Done::Land {
+                            obj,
+                            version,
+                            deleted,
+                        }
+                    }));
                 }
             }
         }
         issued
-    }
-}
-
-/// Run a fetch or a landing to its outcome. Only a fetch has an abort registration.
-async fn run_call<B: OutboxBackend>(
-    backend: Arc<B>,
-    cmd: Command,
-    abort: Option<AbortRegistration>,
-) -> Done {
-    match (cmd, abort) {
-        (Command::Fetch { call, job }, Some(registration)) => {
-            let fetch = Abortable::new(backend.fetch(&job), registration).await;
-            Done::Fetch(
-                call,
-                match fetch {
-                    Ok(Ok(fetched)) => Ended::Fetched(fetched),
-                    Ok(Err(error)) => {
-                        tracing::warn!(?error, obj = %job.obj, "an outbox fetch failed; the machine retries it");
-                        Ended::Failed
-                    }
-                    Err(_aborted) => Ended::Cancelled,
-                },
-            )
-        }
-        (Command::Land { obj, version }, None) => {
-            let deleted = backend
-                .land(&obj, version)
-                .await
-                .expect("the wants table failed a landing");
-            Done::Land {
-                obj,
-                version,
-                deleted,
-            }
-        }
-        (cmd, _) => unreachable!("not a call: {cmd:?}"),
     }
 }

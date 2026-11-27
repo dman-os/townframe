@@ -21,7 +21,7 @@ pub mod driver;
 pub mod durable_outbox;
 pub mod fingerprint;
 mod ids;
-mod kit;
+pub mod kit;
 pub mod long_poll;
 pub mod okv;
 pub mod part_store;
@@ -37,7 +37,3 @@ pub enum AllowedStrat {
     #[default]
     CursorAndBucket,
 }
-
-/// The driver's injected clock; the machine never reads time itself. Its instant is the
-/// web-safe `kit::scheduler::Instant`.
-pub type Clock = std::sync::Arc<dyn Fn() -> kit::scheduler::Instant + Send + Sync>;

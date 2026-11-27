@@ -8,7 +8,7 @@ use futures::channel::oneshot;
 use futures::executor::block_on;
 
 use super::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::part_store::laws;
 use crate::part_store::laws::add;
 use crate::part_store::laws::grant;

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::interlude::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::rev::Rev;
 
 /// Names one parked poll. The caller picks it and never reuses a live one.

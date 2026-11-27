@@ -144,7 +144,7 @@ use crate::interlude::*;
 
 use std::collections::BTreeMap;
 
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::part_store::ObjPayload;
 use crate::rev::Rev;
 use crate::sync::cursor::JobKey;

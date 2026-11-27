@@ -9,7 +9,7 @@ use super::world::Fate;
 use super::world::World;
 use super::world::WorldBackend;
 use super::*;
-use crate::Clock;
+use crate::kit::Clock;
 use crate::okv::OkvStore;
 use crate::rev::Limits;
 use crate::rev::Page;

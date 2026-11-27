@@ -3,7 +3,7 @@
 
 use std::sync::LazyLock;
 
-use big_automata::Clock;
+use big_automata::kit::Clock;
 use big_automata::part_store::laws::Backend;
 use big_automata::part_store::laws::LogStreams;
 use big_automata::part_store::laws::{self};

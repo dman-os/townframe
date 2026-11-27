@@ -286,7 +286,7 @@ static HEAP: utils_rs::testing::alloc_count::CountingAllocator =
 /// reported, never gated: a browser has no instruction counter. `#bench` holds one
 /// `BENCH_RECORD` line per measurement.
 async fn run_bench(objects: usize, rtt_ms: u64) {
-    let clock: big_automata::Clock = Arc::new(web_time::Instant::now);
+    let clock: big_automata::kit::Clock = Arc::new(web_time::Instant::now);
     let report = big_automata::bench::sync_once(
         objects,
         std::time::Duration::from_millis(rtt_ms),

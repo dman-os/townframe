@@ -29,7 +29,7 @@ use super::wire::SessionUpdated;
 use super::wire::TargetId;
 use super::wire::UpdateSession;
 use super::wire::Verdict;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::ObjPayload;

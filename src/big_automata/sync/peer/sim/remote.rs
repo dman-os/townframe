@@ -43,7 +43,7 @@ use crate::sync::rpc::bucket::LeafBucketRequest;
 
 use std::sync::atomic::AtomicU64;
 
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 
 /// Our principal at the peer.
 pub(super) fn me() -> PeerKey {

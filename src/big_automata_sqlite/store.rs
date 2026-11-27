@@ -2,7 +2,7 @@
 //! `read.rs`, `serve.rs` and `log.rs`.
 
 use big_automata::BuckLevel;
-use big_automata::Clock;
+use big_automata::kit::Clock;
 use big_automata::long_poll::LongPollHub;
 use big_automata::part_store::AccessLevel;
 use big_automata::part_store::AuthorizedPage;

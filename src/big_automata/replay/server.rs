@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 
 use crate::interlude::*;
 
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;

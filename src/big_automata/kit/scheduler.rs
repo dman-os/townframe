@@ -12,10 +12,7 @@ use crate::interlude::*;
 
 pub mod keyed;
 
-// std's `Instant::now` panics on wasm32-unknown-unknown, which has no clock syscall. web-time's
-// `Instant` is a re-export of std's on every other target and reads `performance.now()` in the
-// browser, so the scheduler's caller-supplied `now` can come from the same type everywhere.
-pub type Instant = web_time::Instant;
+use super::Instant;
 
 pub type TaskId = u64;
 

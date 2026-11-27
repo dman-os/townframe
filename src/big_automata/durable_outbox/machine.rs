@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::interlude::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Instant;
 use crate::kit::scheduler::TaskId;
 use crate::kit::scheduler::keyed::KeyedScheduler;
 

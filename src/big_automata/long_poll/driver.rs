@@ -16,9 +16,9 @@
 
 use tokio::sync::watch;
 
-use crate::Clock;
 use crate::interlude::*;
-use crate::kit::scheduler::Instant;
+use crate::kit::Clock;
+use crate::kit::Instant;
 use crate::rev::Rev;
 
 use super::Linger;

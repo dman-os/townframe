@@ -202,7 +202,7 @@ impl Time {
         self.0.elapsed_ms.load(Ordering::SeqCst)
     }
 
-    fn clock(&self) -> big_automata::Clock {
+    fn clock(&self) -> big_automata::kit::Clock {
         let time = self.clone();
         Arc::new(move || time.now())
     }

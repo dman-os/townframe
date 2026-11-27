@@ -12,7 +12,6 @@ use std::sync::atomic::Ordering;
 
 use crate::interlude::*;
 
-use crate::Clock;
 use crate::driver::DriverConfig;
 use crate::driver::Fact;
 use crate::driver::Facts;
@@ -24,6 +23,7 @@ use crate::driver::SyncBackend;
 use crate::driver::memory::LwwPayload;
 use crate::driver::memory::MemoryBackend;
 use crate::driver::memory::MemoryPeerCursors;
+use crate::kit::Clock;
 use crate::long_poll::RuntimeTimer;
 use crate::part_store::PartStoreRead;
 use crate::part_store::laws::obj;
