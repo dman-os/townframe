@@ -20,14 +20,14 @@ keyline_sqlite = { path = "../keyline_sqlite" }
 # `big_repo`. The workspace root's `[patch.crates-io]` points keyhive's registry names at the same
 # keyhive rev, so `keyline_sqlite` and subduction's own registry-named keyhive dependencies resolve
 # to the very crates declared here.
-keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd", default-features = false, features = ["std"] }
-keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd", default-features = false, features = ["std"] }
-keyline = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd", default-features = false, features = ["std"] }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
 automerge = "0.12.0"
 future_form.workspace = true
 thiserror.workspace = true
@@ -48,4 +48,4 @@ async-trait.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 # The upstream `MinimizedTreeStore` conformance checks, and the fork's signer for sealing fixtures.
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27", features = ["conformance", "test_utils"] }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97", features = ["conformance", "test_utils"] }

@@ -22,6 +22,7 @@ members = [
   "./src/big_automata_sqlite/",
   "./src/big_automata_web/",
   "./src/keyline_sqlite/",
+  "./src/keyhive_sqlite/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -399,13 +400,13 @@ ui = { path = "./src/ui" }
 # version) resolve to the fork's `townframe-changes` tip, which `big_hive` names directly. One
 # source per crate is what makes `SqliteKeyline` satisfy the fork's `Keyline` bound. `big_repo`
 # takes the older keyhive by git rev and is unaffected.
-keyline = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-keyline_memory = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-keyhive_content = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
-beekem = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyline_memory = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_content = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+beekem = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
 # hyper 1.12.0 plus a fix: the h1 server refreshed its cached Date value on every connection even
 # with `auto_date_header(false)`, and the refresh reads `SystemTime::now()`, which panics on
 # wasm32-unknown-unknown, so a browser node could not serve HTTP/1. The fix skips the refresh when

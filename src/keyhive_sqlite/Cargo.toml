@@ -1,0 +1,42 @@
+[package]
+name = "keyhive_sqlite"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+sqlite_rs.workspace = true
+future_form.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+chacha20poly1305.workspace = true
+
+# The registry releases of keyhive, which the workspace's `[patch.crates-io]` points at the fork's
+# `keyline/hive-store` rev: the `KeyhiveStore` trait exists only there, and `keyline_sqlite` and
+# `big_hive` name the same crates, so the types unify.
+keyhive_core = { version = "0.12.3", default-features = false }
+keyhive_content = { version = "0.4.0", default-features = false, features = ["std"] }
+keyhive_codec = { version = "0.1.0", default-features = false, features = ["std"] }
+keyhive_crypto = { version = "0.6.0", default-features = false, features = ["std"] }
+beekem = { version = "0.9.0", default-features = false, features = ["std"] }
+
+# `chacha20poly1305`'s nonces and the DEKs draw randomness through getrandom 0.2, whose browser
+# backend is its `js` feature; without it the crate does not compile for `wasm32-unknown-unknown`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+keyhive_core = { version = "0.12.3", features = ["arbitrary"] }
+beekem = { version = "0.9.0", features = ["arbitrary", "std"] }
+keyhive_crypto = { version = "0.6.0", features = ["arbitrary", "std"] }
+arbitrary = "1.4.1"
+proptest.workspace = true
+ed25519-dalek.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+rand08 = { package = "rand", version = "0.8" }

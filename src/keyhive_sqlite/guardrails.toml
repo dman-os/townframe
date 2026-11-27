@@ -1,0 +1,24 @@
+version = 1
+role = "runtime"
+dependency_reason = "The SQLite KeyhiveStore keeps keyhive's per-entity state over sqlite_rs, in transactions it shares with keyline_sqlite and the sedimentree stores of one database."
+allowed_dependencies = ["sqlite_rs"]
+allow_external_api_types = true
+
+[builds.native]
+features = []
+required_features = []
+default_features = true
+
+[builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = true
+
+# Generic over `sqlite_rs::SqliteDb`, so it builds for the browser without a browser backend.
+[builds.wasm32-unknown-unknown]
+features = []
+required_features = []
+default_features = true
+
+[migrations]
+"src/keyhive_sqlite/sqlite/migrations/001_init.sql" = "5ac052915958a6815e9868daf52c27c44a097d039c7327f31ca5a4e86f6e60ba"
