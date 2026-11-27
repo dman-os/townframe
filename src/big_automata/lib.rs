@@ -29,6 +29,7 @@ pub mod replay;
 pub mod rev;
 #[cfg(test)]
 mod scaling;
+pub mod sessions;
 pub mod sync;
 
 #[derive(Default, Debug, Clone, Copy)]

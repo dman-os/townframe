@@ -129,6 +129,12 @@ pub enum big_automata::replay::wire::PageEvent { # [doc = " The object is a live
 pub enum big_automata::replay::wire::Route { # [doc = " Every membership change in the part, with the content of its live members."] Part { part_key : PartKey }, # [doc = " One object's content changes, in the parts the client may read."] Object { obj_key : ObjKey } }
 pub enum big_automata::replay::wire::SessionError { # [doc = " the server does not hold this session"] UnknownSession, # [doc = " the round named a target the session does not hold"] UnknownTarget { target : TargetId }, # [doc = " the request is over a server limit"] Limit, # [doc = " the request is malformed: {0}"] Invalid (String), # [doc = " the request context failed: {0}"] Context (# [from] method_core :: ContextError) }
 pub enum big_automata::replay::wire::Verdict { # [doc = " The page carries every row of the target in `(cursor, resume]`. `drained`: the read"] # [doc = " reached the newest revision of the round's snapshot."] Events { resume : Rev , drained : bool }, # [doc = " The client may not read the target now, or its route is unknown; the two answer alike."] Refused }
+pub enum big_automata::sessions::Grace { Starting, Until (Instant) }
+pub enum big_automata::sessions::interest::Command< K , S > { AddRoute { object : K , session : S }, RemoveRoute { object : K , session : S }, NeedSession { session : S }, ReleaseSession { session : S } }
+pub enum big_automata::sessions::interest::Phase { Wanted, Routed, Idle (Grace) }
+pub enum big_automata::sessions::interest::Tier { # [doc = " It exists anyway: our own principal toward a connected peer."] Default, # [doc = " It is opened only because an object needs it, and closed when none does."] OnDemand }
+pub enum big_automata::sessions::session::Command< P , L > { Dial { call : CallId , peer : P , principal : L }, Close { peer : P , principal : L } }
+pub enum big_automata::sessions::session::Phase { Wanted { admitted : bool }, Dialing { call : CallId }, Open, Idle (Grace) }
 pub enum big_automata::sync::rpc::RpcError { # [doc = " TransportError {0}"] TransportError (String), # [doc = " InvalidRequest {0}"] InvalidRequest (String), # [doc = " Unauthorized"] Unauthorized, # [doc = " UnknownSubscription"] UnknownSubscription, # [doc = " SubscriptionLimit"] SubscriptionLimit, # [doc = " Internal"] Internal }
 pub enum big_automata::sync::rpc::bucket::BucketsError { # [doc = " The part is unknown, or the requester may not read it: both answer alike, so a refusal"] # [doc = " does not confirm the part exists."] UnknownPart, # [doc = " the request names more buckets than the responder answers at once; none was answered"] TooManyBuckets { cap : usize }, # [doc = " the request is malformed: {0}"] Invalid (String), # [doc = " the request context failed: {0}"] Context (# [from] method_core :: ContextError) }
 pub enum big_automata::sync::rpc::summary::PartSummariesError { # [doc = " the request names more parts than the responder answers at once; no part was answered"] TooManyParts { cap : usize }, # [doc = " the request context failed: {0}"] Context (# [from] method_core :: ContextError) }
@@ -296,6 +302,31 @@ pub impl big_automata::rev::RevWatch::fn latest (& self) -> Rev
 pub impl big_automata::rev::RevWatch::fn new (rx : watch :: Receiver < Rev >) -> Self
 pub impl big_automata::rev::laws::WakeCount::fn count (& self) -> usize
 pub impl big_automata::rev::laws::WakeCount::fn poll < F : Future > (& self , future : Pin < & mut F >) -> Poll < F :: Output >
+pub impl big_automata::sessions::interest::Interest < K , S >::fn flush (& mut self , now : Instant , out : & mut Vec < Command < K , S > >)
+pub impl big_automata::sessions::interest::Interest < K , S >::fn is_empty (& self) -> bool
+pub impl big_automata::sessions::interest::Interest < K , S >::fn lease_acquired (& mut self , object : K)
+pub impl big_automata::sessions::interest::Interest < K , S >::fn lease_dropped (& mut self , object : & K)
+pub impl big_automata::sessions::interest::Interest < K , S >::fn needed (& self , session : & S) -> bool
+pub impl big_automata::sessions::interest::Interest < K , S >::fn needs (& self , object : & K) -> Option < & BTreeSet < S > >
+pub impl big_automata::sessions::interest::Interest < K , S >::fn new (grace : Duration) -> Self
+pub impl big_automata::sessions::interest::Interest < K , S >::fn next_due (& self) -> Option < Instant >
+pub impl big_automata::sessions::interest::Interest < K , S >::fn phase (& self , object : & K) -> Option < Phase >
+pub impl big_automata::sessions::interest::Interest < K , S >::fn refused (& mut self , object : & K , session : & S)
+pub impl big_automata::sessions::interest::Interest < K , S >::fn routes (& self , object : & K) -> Option < & BTreeSet < S > >
+pub impl big_automata::sessions::interest::Interest < K , S >::fn session_closed (& mut self , session : & S)
+pub impl big_automata::sessions::interest::Interest < K , S >::fn session_opened (& mut self , session : S)
+pub impl big_automata::sessions::interest::Interest < K , S >::fn standing (& mut self , object : & K , eligible : BTreeMap < S , Tier >)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn closed (& mut self , now : Instant , peer : P , principal : L)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn dialed (& mut self , now : Instant , call : CallId , ok : bool)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn flush (& mut self , now : Instant , out : & mut Vec < Command < P , L > >)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn need (& mut self , peer : P , principal : L)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn new (cfg : Config) -> Self
+pub impl big_automata::sessions::session::Sessions < P , L >::fn next_due (& self) -> Option < Instant >
+pub impl big_automata::sessions::session::Sessions < P , L >::fn peer_connected (& mut self , peer : P , default : L)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn peer_disconnected (& mut self , peer : & P)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn phase (& self , peer : & P , principal : & L) -> Option < Phase >
+pub impl big_automata::sessions::session::Sessions < P , L >::fn release (& mut self , peer : P , principal : L)
+pub impl big_automata::sessions::session::Sessions < P , L >::fn sessions (& self) -> impl Iterator < Item = (& P , & L , Phase) >
 pub impl big_automata::sync::rpc::bucket::BucketObjPageEntry::fn fingerprint (seed : & FingerprintSeed , obj_key : & ObjKey , digest : PayloadDigest ,) -> Fingerprint < (& 'static str , ObjKey , PayloadDigest) >
 pub impl big_automata::sync::rpc::responder::RpcResponder < S >::async fn changed_buckets (& self , principal : & PeerKey , req : GetChangedBucketsRequest ,) -> Res < Result < GetChangedBucketsResponse , BucketsError > >
 pub impl big_automata::sync::rpc::responder::RpcResponder < S >::async fn leaf_buckets (& self , principal : & PeerKey , req : LeafBucketsRequest ,) -> Res < Result < LeafBucketsResponse , BucketsError > >
@@ -332,6 +363,9 @@ pub mod big_automata::replay::server
 pub mod big_automata::replay::wire
 pub mod big_automata::rev
 pub mod big_automata::rev::laws
+pub mod big_automata::sessions
+pub mod big_automata::sessions::interest
+pub mod big_automata::sessions::session
 pub mod big_automata::sync
 pub mod big_automata::sync::rpc
 pub mod big_automata::sync::rpc::bucket
@@ -391,6 +425,9 @@ pub struct big_automata::rev::RevMap< S , F >  {  }
 pub struct big_automata::rev::RevStream< S : RevSource >  {  }
 pub struct big_automata::rev::RevWatch  {  }
 pub struct big_automata::rev::laws::WakeCount  {  }
+pub struct big_automata::sessions::interest::Interest< K , S >  {  }
+pub struct big_automata::sessions::session::Config  { grace: Duration, per_peer: usize, total: usize, backoff: Duration, max_backoff: Duration }
+pub struct big_automata::sessions::session::Sessions< P , L >  {  }
 pub struct big_automata::sync::PeerCursor  { generation: Generation, rev: Rev }
 pub struct big_automata::sync::rpc::bucket::GetChangedBucketsRequest  { part_key: PartKey, offset: BuckId, to_level: BuckLevel, since: Rev, limit_hint: u32 }
 pub struct big_automata::sync::rpc::responder::RpcResponder< S >  {  }
@@ -419,6 +456,7 @@ pub type big_automata::replay::wire::Generation = u64
 pub type big_automata::replay::wire::SessionId = Uuid
 pub type big_automata::replay::wire::TargetId = u32
 pub type big_automata::rev::Rev = u64
+pub type big_automata::sessions::session::CallId = u64
 pub type big_automata::sync::rpc::BigSyncRpcResult< T > = Result < T , RpcError >
 pub type big_automata::sync::rpc::bucket::GetChangedBucketsResponse = Vec < BucketSummary >
 pub type big_automata::sync::rpc::bucket::LeafBucketsResponse = Map < BuckId , LeafBucketPage >

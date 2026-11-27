@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b9f04456af11fa9825a42b98e3d90dba26ef7762722d58836f4ea5bc70ae3bbf # shrinks to ops = [PeerStanding(1, 1, true), LocalStanding(1, 1, true), Connect(1), Acquire(1)]
