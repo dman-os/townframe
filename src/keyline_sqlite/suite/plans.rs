@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use future_form::Local;
 use futures::executor::block_on;
@@ -25,101 +24,13 @@ use keyline::test_utils::conformance::d;
 use keyline::test_utils::conformance::r;
 use keyline::test_utils::id;
 use sqlite_rs::Database;
-use sqlite_rs::ExecuteResult;
-use sqlite_rs::Executor;
-use sqlite_rs::IntoParams;
-use sqlite_rs::QueryExecutor;
-use sqlite_rs::ReadTx;
-use sqlite_rs::ResultSet;
-use sqlite_rs::SqlResult;
 use sqlite_rs::SqlValue;
-use sqlite_rs::Tx;
 
 use super::fresh_db;
+use super::recording::Recording;
 use super::sign;
 use crate::SqliteKeyline;
 use crate::sqlite::queries;
-use sqlite_rs::SqliteDb;
-
-type Log = Arc<Mutex<BTreeMap<String, Vec<SqlValue>>>>;
-
-#[derive(Clone)]
-struct Recording {
-    db: Database,
-    log: Log,
-}
-
-struct RecordingWrite {
-    tx: Tx,
-    log: Log,
-}
-
-struct RecordingRead {
-    tx: ReadTx,
-    log: Log,
-}
-
-fn record(log: &Log, sql: &str, params: &[SqlValue]) {
-    log.lock()
-        .expect("the log mutex is not poisoned")
-        .entry(sql.to_owned())
-        .or_insert_with(|| params.to_vec());
-}
-
-impl QueryExecutor for RecordingWrite {
-    async fn query(&self, sql: &str, params: impl IntoParams) -> SqlResult<ResultSet> {
-        let params = params.into_params();
-        record(&self.log, sql, &params);
-        self.tx.query(sql, params).await
-    }
-}
-
-impl Executor for RecordingWrite {
-    async fn execute(&self, sql: &str, params: impl IntoParams) -> SqlResult<ExecuteResult> {
-        let params = params.into_params();
-        record(&self.log, sql, &params);
-        self.tx.execute(sql, params).await
-    }
-}
-
-impl QueryExecutor for RecordingRead {
-    async fn query(&self, sql: &str, params: impl IntoParams) -> SqlResult<ResultSet> {
-        let params = params.into_params();
-        record(&self.log, sql, &params);
-        self.tx.query(sql, params).await
-    }
-}
-
-impl SqliteDb for Recording {
-    type Write = RecordingWrite;
-    type Read = RecordingRead;
-
-    async fn begin_write(&self) -> SqlResult<RecordingWrite> {
-        Ok(RecordingWrite {
-            tx: self.db.begin_write().await?,
-            log: Arc::clone(&self.log),
-        })
-    }
-
-    async fn begin_read(&self) -> SqlResult<RecordingRead> {
-        Ok(RecordingRead {
-            tx: self.db.begin_read().await?,
-            log: Arc::clone(&self.log),
-        })
-    }
-
-    async fn commit(tx: RecordingWrite) -> SqlResult<()> {
-        tx.tx.commit().await
-    }
-
-    async fn rollback(tx: RecordingWrite) -> SqlResult<()> {
-        tx.tx.rollback().await
-    }
-
-    async fn end_read(tx: RecordingRead) -> SqlResult<()> {
-        tx.tx.rollback().await
-    }
-}
 
 /// The plan of `sql`, one line per step.
 async fn plan(db: &Database, sql: &str, params: &[SqlValue]) -> Vec<String> {
@@ -136,11 +47,8 @@ async fn plan(db: &Database, sql: &str, params: &[SqlValue]) -> Vec<String> {
 #[test]
 fn every_statement_is_served_by_an_index() {
     block_on(async {
-        let log = Log::default();
-        let recording = Recording {
-            db: fresh_db(),
-            log: Arc::clone(&log),
-        };
+        let recording = Recording::new(fresh_db());
+        let log = Arc::clone(&recording.log);
         let store = SqliteKeyline::<(), _>::new(recording.clone());
         let bob = d(ALICE, BOB, DOC, Power::Edit);
         let batch = vec![
@@ -165,14 +73,34 @@ fn every_statement_is_served_by_an_index() {
         Keyline::<Local>::subjects(k).await.unwrap();
         Keyline::<Local>::digest(k).await.unwrap();
         Keyline::<Local>::certificates(k).await.unwrap();
-        // A store with an empty cache rebuilds from the rows.
-        Keyline::<Local>::members(&SqliteKeyline::<(), _>::new(recording), id(DOC))
+        // The evaluated queries, each through a store that has not seen the inserts (the insert
+        // computed the disputed document's live set); the delegation's liveness, rooted at its own
+        // subject; and a subset.
+        let cold = SqliteKeyline::<(), _>::new(recording);
+        Keyline::<Local>::members(&cold, id(DOC)).await.unwrap();
+        // `OWNERS` is not disputed: its answers are reads of the stored reach.
+        Keyline::<Local>::members(&cold, id(OWNERS)).await.unwrap();
+        Keyline::<Local>::effective_power(&cold, id(OWNERS), id(ALICE))
+            .await
+            .unwrap();
+        Keyline::<Local>::effective_power(&cold, id(DOC), id(BOB))
+            .await
+            .unwrap();
+        Keyline::<Local>::positive_power(&cold, id(DOC), id(BOB))
+            .await
+            .unwrap();
+        Keyline::<Local>::closure(&cold, id(DOC)).await.unwrap();
+        Keyline::<Local>::is_live(&cold, bob.digest()).await.unwrap();
+        Keyline::<Local>::conveyed_power(&cold, bob.digest())
+            .await
+            .unwrap();
+        Keyline::<Local>::members_for_subset(&cold, [cert].into(), id(DOC))
             .await
             .unwrap();
 
         let statements = log.lock().unwrap().clone();
         assert!(
-            statements.len() >= 10,
+            statements.len() >= 40,
             "the workload ran {} distinct statements",
             statements.len()
         );
@@ -182,6 +110,7 @@ fn every_statement_is_served_by_an_index() {
         for (sql, params) in &statements {
             let lines = plan(&db, sql, params).await;
             let whole_set = [
+                queries::HAS_DISPUTED_SQL,
                 queries::ALL_CERTIFICATES_SQL,
                 queries::ALL_CERTIFICATE_IDS_SQL,
                 queries::SUBJECTS_SQL,
@@ -190,8 +119,20 @@ fn every_statement_is_served_by_an_index() {
             for line in &lines {
                 // A search bounded only by `kind` walks every certificate of that kind: a scan that
                 // looks like an index search.
-                let kind_range = line.ends_with("PRIMARY KEY (kind=?)");
+                let kind_range = line.ends_with("PRIMARY KEY (kind=?)")
+                    && !line.starts_with("SEARCH nw ")
+                    && !line.starts_with("SEARCH keyline_new ");
+                // The tables a scan is allowed to drive: the four levels, and the batch, the roots
+                // and the contexts of a computation in progress, each bounded by the work at hand.
+                let bounded = ["lv", "nw", "rt", "x", "t", "a", "keyline_new", "keyline_root", "keyline_ctx_use", "keyline_level", "keyline_touched", "keyline_affected"]
+                    .iter()
+                    .any(|table| {
+                        line.strip_prefix("SCAN ")
+                            .is_some_and(|rest| rest.split_whitespace().next() == Some(table))
+                    });
                 let scan = line.starts_with("SCAN")
+                    && !bounded
+                    && !line.starts_with("SCAN (subquery")
                     && !line.contains("VALUES CLAUSE")
                     && !line.contains("CONSTANT ROW");
                 if (scan && !whole_set) || (kind_range && !whole_set) {
@@ -236,6 +177,41 @@ fn every_statement_is_served_by_an_index() {
             revocations.contains("keyline_revocations_by_target (revoke=?"),
             "{revocations}"
         );
+        // The access paths the evaluation's statements are for: a round reads only its delta, by
+        // epoch; a delegation's row is a primary-key lookup; a subset is by primary key.
+        for sql in [queries::REACH_ROUND_SQL, queries::LIVE_ROUND_SQL] {
+            let rounds = plan_of(sql);
+            assert!(
+                rounds.contains("_by_epoch (epoch=?)"),
+                "a round must start from its delta:\n{rounds}"
+            );
+        }
+        let subject = plan_of(queries::DELEGATION_ROW_SQL);
+        assert!(
+            subject.contains("PRIMARY KEY (kind=? AND digest=?)"),
+            "{subject}"
+        );
+        let plan_prefix = |prefix: &str| {
+            plans
+                .iter()
+                .find(|(sql, _)| sql.starts_with(prefix))
+                .map(|(_, lines)| lines.join("\n"))
+                .unwrap_or_else(|| panic!("never ran: {prefix}"))
+        };
+        let ids = plan_prefix(
+            "SELECT kind, digest, signed FROM keyline_certificates WHERE (kind, digest) IN",
+        );
+        assert!(ids.contains("PRIMARY KEY (kind=? AND digest=?)"), "{ids}");
+        for (name, sql) in [
+            ("is_disputed", queries::IS_DISPUTED_SQL),
+            ("reach_standing", queries::REACH_STANDING_SQL),
+            ("reach_members", queries::REACH_MEMBERS_SQL),
+            ("live_members", queries::LIVE_MEMBERS_SQL),
+            ("live_standing", queries::LIVE_STANDING_SQL),
+        ] {
+            let lines = plan_of(sql);
+            assert!(lines.contains("PRIMARY KEY"), "{name} must be a key search:\n{lines}");
+        }
         // The whole-set reads scan, and in the order they return: no sort.
         for sql in [
             queries::ALL_CERTIFICATES_SQL,

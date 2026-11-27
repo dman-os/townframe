@@ -32,9 +32,49 @@ pub struct CertificateRow {
     signed: Vec<u8>,
 }
 
+/// What the rounds read of a certificate being inserted: its row in `keyline_new`.
+#[derive(Clone)]
+pub struct NewRow(
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<i64>,
+    Option<Vec<u8>>,
+);
+
+impl NewRow {
+    pub const WIDTH: usize = 7;
+}
+
+impl BindTuple for NewRow {
+    fn bind_tuple(self, sql: &mut Sql) {
+        (self.0, self.1, self.2, self.3, self.4, self.5, self.6).bind_tuple(sql);
+    }
+}
+
 impl CertificateRow {
+    /// The columns the evaluation's rounds read.
+    pub fn staged(&self) -> NewRow {
+        NewRow(
+            self.kind,
+            self.digest.clone(),
+            self.issuer.clone(),
+            self.audience.clone(),
+            self.subject.clone(),
+            self.power,
+            self.revoke.clone(),
+        )
+    }
+
     /// Variables a row binds.
     pub const WIDTH: usize = 10;
+
+    /// The certificate frame this row stores.
+    pub fn signed(&self) -> &[u8] {
+        &self.signed
+    }
 
     pub fn of<W: Encode>(cert: &VerifiedCertificate<W>) -> Self {
         let (kind, digest) = kind_and_digest(cert.id());

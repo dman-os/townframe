@@ -119,8 +119,7 @@ pub fn insert(state: (Store, Vec<VerifiedCertificate<()>>)) -> u64 {
     format!("{version:?}").len() as u64
 }
 
-/// Setup of the queries: a store that inserted the star, so its cache holds the set and no
-/// evaluation yet.
+/// Setup of the queries: a store that inserted the star, so its verification memo holds the batch.
 pub fn inserted(members: usize) -> (Store, Fixture) {
     let (store, certs) = to_insert(members);
     let fixture = star(0, false);
@@ -134,7 +133,7 @@ pub fn inserted(members: usize) -> (Store, Fixture) {
     )
 }
 
-/// The first `members` after an insert: both strata over the whole set, then the subject's row.
+/// `members` of the star's document: its closure (every member's grant) loaded and evaluated.
 pub fn members_after_insert(state: (Store, Fixture)) -> usize {
     let (store, fixture) = state;
     block_on(Keyline::<Local>::members(&store, fixture.doc))
@@ -170,8 +169,8 @@ pub fn stored(members: usize) -> (Database, Identifier) {
     (db, fixture.doc)
 }
 
-/// `members` on a store that has just attached: every row read, decoded and verified again,
-/// then both strata, then the row.
+/// `members` on a store that has just attached: the closure's rows read, decoded and verified,
+/// then evaluated.
 pub fn cold_members(state: (Database, Identifier)) -> usize {
     let (db, doc) = state;
     block_on(Keyline::<Local>::members(&Store::new(db), doc))

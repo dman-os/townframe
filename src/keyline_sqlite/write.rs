@@ -6,6 +6,8 @@ use keyline::contract::Version;
 use sqlite_rs::Executor;
 use sqlite_rs::Sql;
 
+use crate::engine;
+use crate::engine::Extension;
 use crate::error::Error;
 use crate::rows::CertificateRow;
 use crate::sqlite::queries;
@@ -18,20 +20,27 @@ const MAX_PARAMS: usize = 30_000;
 /// reads through that transaction until it commits.
 ///
 /// Hand it to [`SqliteKeyline::committed`](crate::SqliteKeyline::committed) after the
-/// transaction commits, so the backend's cache follows the tables. Drop it after a rollback:
-/// nothing outside the transaction ever saw the batch, and the cache never held it.
+/// transaction commits, so the backend's verification memo knows the batch. Drop it after a rollback:
+/// nothing outside the transaction ever saw the batch.
 #[must_use = "pass it to `SqliteKeyline::committed` once the transaction commits, or drop it after a rollback"]
 pub struct Staged<W> {
     /// The version the transaction read before it inserted.
     pub(crate) base: i64,
     /// The version after the insert: `base`, or one more if the batch added a certificate.
     pub(crate) version: i64,
-    /// The batch, if it added anything; some of it may have been in the set already, which the
-    /// cache's own insert ignores.
-    pub(crate) added: Vec<VerifiedCertificate<W>>,
+    /// The batch with the bytes written for each, if it added anything; some of it may have been in
+    /// the set already. Handed to the verification memo once the transaction commits.
+    pub(crate) warm: Vec<(Vec<u8>, VerifiedCertificate<W>)>,
+    /// What extending the stored reach by the batch cost.
+    extension: Extension,
 }
 
 impl<W> Staged<W> {
+    /// Rounds and facts of extending the stored reach by the batch.
+    pub fn extension(&self) -> Extension {
+        self.extension
+    }
+
     /// The version of the set after the transaction commits: what
     /// [`Keyline::insert`](keyline::contract::Keyline::insert) would return.
     pub fn version(&self) -> Version {
@@ -46,7 +55,7 @@ impl<W> Staged<W> {
 
 /// Add `batch` through `tx`, which must hold the database's writer.
 ///
-/// `INSERT OR IGNORE` leaves certificates already in the set alone and reports how many rows
+/// `ON CONFLICT DO NOTHING` leaves certificates already in the set alone and reports how many rows
 /// it added, so the version moves exactly when the set grew (by one for the whole batch).
 pub async fn insert_in<W: Encode>(
     tx: &impl Executor,
@@ -54,29 +63,39 @@ pub async fn insert_in<W: Encode>(
 ) -> Result<Staged<W>, Error> {
     let base = queries::meta_version(tx).await?;
     let mut inserted = 0;
+    let mut warm = Vec::with_capacity(batch.len());
+    let mut staged_rows = Vec::with_capacity(batch.len());
     for chunk in batch.chunks(MAX_PARAMS / CertificateRow::WIDTH) {
         let mut sql = Sql::new(
-            "INSERT OR IGNORE INTO keyline_certificates\n     ( kind\n     , digest\n     , issuer\n     , audience\n     , subject\n     , power\n     , citation\n     , revoke\n     , retain\n     , signed\n     )\nVALUES ",
+            "INSERT INTO keyline_certificates\n     ( kind\n     , digest\n     , issuer\n     , audience\n     , subject\n     , power\n     , citation\n     , revoke\n     , retain\n     , signed\n     )\nVALUES ",
         );
         for (index, cert) in chunk.iter().enumerate() {
             if index != 0 {
                 sql.push(", ");
             }
-            sqlite_rs::BindTuple::bind_tuple(CertificateRow::of(cert), &mut sql);
+            let row = CertificateRow::of(cert);
+            warm.push((row.signed().to_vec(), cert.clone()));
+            staged_rows.push(row.staged());
+            sqlite_rs::BindTuple::bind_tuple(row, &mut sql);
         }
+        sql.push("\n    ON CONFLICT DO NOTHING");
         inserted += sql.execute(tx).await?.rows_affected;
     }
     if inserted == 0 {
         return Ok(Staged {
             base,
             version: base,
-            added: Vec::new(),
+            warm: Vec::new(),
+            extension: Extension::default(),
         });
     }
     queries::bump_version(tx).await?;
+    // The set grew: extend the stored reach by the batch (duplicates among it derive nothing new).
+    let extension = engine::extend(tx, staged_rows).await?;
     Ok(Staged {
         base,
         version: base + 1,
-        added: batch,
+        warm,
+        extension,
     })
 }

@@ -24,11 +24,14 @@ use keyline::contract::set_digest;
 use keyline::delegation::Delegation;
 use keyline::power::Power;
 use keyline::revocation::RevocationId;
-use keyline_memory::state::State;
 use sqlite_rs::Executor;
 
-use crate::cache::Cache;
+use crate::closure;
 use crate::error::Error;
+use crate::memo::Memo;
+use crate::read;
+use crate::read::Question;
+use crate::read::Reply;
 use crate::rows;
 use crate::sqlite::queries;
 use crate::write;
@@ -37,18 +40,19 @@ use sqlite_rs::SqliteDb;
 
 /// The Keyline certificate set in a SQLite database.
 ///
-/// Clones share the database handle and the evaluation cache. The database's own transactions
-/// are the concurrency control: a query reads one snapshot, an insert holds the writer.
+/// Clones share the database handle and the verification memo. The database's own transactions
+/// are the concurrency control: a query reads one snapshot, an insert holds the writer. Nothing
+/// else is held between calls but the verification memo: the evaluation lives in the tables.
 pub struct SqliteKeyline<W, D: SqliteDb> {
     db: D,
-    cache: Arc<Cache<W>>,
+    memo: Arc<Memo<W>>,
 }
 
 impl<W, D: SqliteDb> Clone for SqliteKeyline<W, D> {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
-            cache: Arc::clone(&self.cache),
+            memo: Arc::clone(&self.memo),
         }
     }
 }
@@ -78,7 +82,7 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
     pub fn new(db: D) -> Self {
         Self {
             db,
-            cache: Arc::default(),
+            memo: Arc::default(),
         }
     }
 
@@ -97,11 +101,45 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         write::insert_in(tx, batch).await
     }
 
-    /// The commit half of [`insert_in`](Self::insert_in): bring the evaluation cache up to the
-    /// version the transaction committed. It is only a cache: a store that is never told still
-    /// answers correctly, by rebuilding from the tables on its next query.
+    /// The commit half of [`insert_in`](Self::insert_in): hand the verification memo the batch the
+    /// transaction committed, so the first read of those rows does not verify them again. It is
+    /// only a memo: a store that is never told answers correctly, verifying on first read.
     pub fn committed(&self, staged: Staged<W>) {
-        self.cache.committed(staged);
+        self.memo.warm(staged.warm);
+    }
+
+    /// `members(subject)` through `tx`, a transaction the caller owns: for a caller that combines
+    /// the answer with writes of other stores in one transaction.
+    pub async fn members_in(
+        &self,
+        tx: &impl Executor,
+        subject: Identifier,
+    ) -> Result<BTreeMap<Identifier, Power>, Error> {
+        match self.ask_in(tx, Question::Members(subject)).await? {
+            Reply::Members(members) => Ok(members),
+            other => unreachable!("members answered with {other:?}"),
+        }
+    }
+
+    /// `effective_power(subject, audience)` through `tx`, as [`members_in`](Self::members_in).
+    pub async fn effective_power_in(
+        &self,
+        tx: &impl Executor,
+        subject: Identifier,
+        audience: Identifier,
+    ) -> Result<Option<Power>, Error> {
+        match self
+            .ask_in(tx, Question::EffectivePower(subject, audience))
+            .await?
+        {
+            Reply::Power(power) => Ok(power),
+            other => unreachable!("effective_power answered with {other:?}"),
+        }
+    }
+
+    /// Answer `question` through `tx`: the answer is a read, and sees what `tx` sees.
+    async fn ask_in(&self, tx: &impl Executor, question: Question) -> Result<Reply, Error> {
+        read::ask(tx, &question).await
     }
 
     async fn snapshot(&self) -> Result<Snapshot<D>, Error> {
@@ -110,17 +148,27 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         Ok(Snapshot { tx, version })
     }
 
-    /// Answer `query` from the evaluated set, at the version one snapshot read.
-    async fn evaluated<T>(
-        &self,
-        query: impl FnOnce(&State<W>) -> T,
-    ) -> Result<Versioned<T>, Error> {
+    /// Answer `question` at the version one snapshot read. Every answer is a read: the stored
+    /// reach and live set are current at every committed version, because the insert that changed
+    /// them updated them in its own transaction.
+    async fn ask(&self, question: Question) -> Result<Versioned<Reply>, Error> {
         let snapshot = self.snapshot().await?;
-        let cached = self.cache.at(&snapshot.tx, snapshot.version).await?;
+        let reply = read::ask(&snapshot.tx, &question).await?;
         let version = snapshot.finish().await?;
         Ok(Versioned {
             version,
-            value: query(&cached.state),
+            value: reply,
+        })
+    }
+
+    async fn power(&self, question: Question) -> Result<Versioned<Option<Power>>, Error> {
+        let answer = self.ask(question).await?;
+        Ok(Versioned {
+            version: answer.version,
+            value: match answer.value {
+                Reply::Power(power) => power,
+                other => unreachable!("a power question answered with {other:?}"),
+            },
         })
     }
 }
@@ -250,11 +298,20 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
         subject: Identifier,
         audience: Identifier,
     ) -> Query<'_, F, Option<Power>, Error> {
-        F::from_future(self.evaluated(move |state| state.effective_power(subject, audience)))
+        F::from_future(self.power(Question::EffectivePower(subject, audience)))
     }
 
     fn members(&self, subject: Identifier) -> Query<'_, F, BTreeMap<Identifier, Power>, Error> {
-        F::from_future(self.evaluated(move |state| state.members(subject)))
+        F::from_future(async move {
+            let answer = self.ask(Question::Members(subject)).await?;
+            Ok(Versioned {
+                version: answer.version,
+                value: match answer.value {
+                    Reply::Members(members) => members,
+                    other => unreachable!("members answered with {other:?}"),
+                },
+            })
+        })
     }
 
     fn members_for_subset(
@@ -262,7 +319,15 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
         subset: BTreeSet<CertificateId>,
         subject: Identifier,
     ) -> Query<'_, F, BTreeMap<Identifier, Power>, Error> {
-        F::from_future(self.evaluated(move |state| state.subset(&subset).members(subject)))
+        F::from_future(async move {
+            let snapshot = self.snapshot().await?;
+            let state = closure::load_ids(&snapshot.tx, subset, &self.memo).await?;
+            let version = snapshot.finish().await?;
+            Ok(Versioned {
+                version,
+                value: state.members(subject),
+            })
+        })
     }
 
     fn subjects(&self) -> Query<'_, F, BTreeSet<Identifier>, Error> {
@@ -281,11 +346,20 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
     }
 
     fn is_live(&self, delegation: Digest<Delegation>) -> Query<'_, F, bool, Error> {
-        F::from_future(self.evaluated(move |state| state.is_live(&delegation)))
+        F::from_future(async move {
+            let answer = self.ask(Question::IsLive(delegation)).await?;
+            Ok(Versioned {
+                version: answer.version,
+                value: match answer.value {
+                    Reply::Live(live) => live,
+                    other => unreachable!("is_live answered with {other:?}"),
+                },
+            })
+        })
     }
 
     fn conveyed_power(&self, delegation: Digest<Delegation>) -> Query<'_, F, Option<Power>, Error> {
-        F::from_future(self.evaluated(move |state| state.conveyed_power(&delegation)))
+        F::from_future(self.power(Question::ConveyedPower(delegation)))
     }
 
     fn positive_power(
@@ -293,11 +367,38 @@ impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeylin
         subject: Identifier,
         audience: Identifier,
     ) -> Query<'_, F, Option<Power>, Error> {
-        F::from_future(self.evaluated(move |state| state.positive_power(subject, audience)))
+        F::from_future(async move {
+            let snapshot = self.snapshot().await?;
+            let value = if subject == audience {
+                Some(Power::Admin)
+            } else {
+                queries::reach_standing(
+                    &snapshot.tx,
+                    subject.to_bytes().to_vec(),
+                    audience.to_bytes().to_vec(),
+                )
+                .await?
+                .map(rows::power_from_sql)
+            };
+            let version = snapshot.finish().await?;
+            Ok(Versioned { version, value })
+        })
     }
 
     fn closure(&self, subject: Identifier) -> Query<'_, F, Vec<Certificate<W>>, Error> {
-        F::from_future(self.evaluated(move |state| state.closure(subject)))
+        F::from_future(async move {
+            let snapshot = self.snapshot().await?;
+            let found =
+                queries::closure_certificates(&snapshot.tx, subject.to_bytes().to_vec()).await?;
+            let version = snapshot.finish().await?;
+            Ok(Versioned {
+                version,
+                value: found
+                    .iter()
+                    .map(|row| rows::certificate_from_sql(&row.signed))
+                    .collect(),
+            })
+        })
     }
 
     fn digest(&self) -> Query<'_, F, Digest<CertificateSet>, Error> {

@@ -1,5 +1,5 @@
 //! Inserts in a transaction the caller owns: what commits and rolls back with it, what the
-//! cache does and does not carry, and what a reopened store makes of the rows.
+//! verification memo does and does not carry, and what a reopened store makes of the rows.
 
 use std::collections::BTreeMap;
 
@@ -171,7 +171,7 @@ fn a_commit_the_store_was_never_told_of_is_still_answered_correctly() {
         drop(store.insert_in(&tx, grants()).await.unwrap());
         Database::commit(tx).await.unwrap();
 
-        // The cache is at version 1 and the tables at 2: the next query rebuilds.
+        // The store was never told of version 2: the next query reads the rows and verifies them.
         let after = members(&store, DOC).await;
         assert_ne!(after, warmed);
         assert_eq!(after, members(&Store::new(db), DOC).await);
@@ -180,7 +180,7 @@ fn a_commit_the_store_was_never_told_of_is_still_answered_correctly() {
 }
 
 #[test]
-fn commits_reported_out_of_order_leave_the_cache_correct() {
+fn commits_reported_out_of_order_leave_the_memo_correct() {
     block_on(async {
         let db = fresh_db();
         let store = Store::new(db.clone());
@@ -190,8 +190,7 @@ fn commits_reported_out_of_order_leave_the_cache_correct() {
             staged.push(store.insert_in(&tx, batch).await.unwrap());
             Database::commit(tx).await.unwrap();
         }
-        // The second commit is reported first, then the first, whose cache step finds the
-        // cache already past it.
+        // The second commit is reported first, then the first.
         let first = staged.remove(0);
         store.committed(staged.remove(0));
         store.committed(first);
@@ -264,7 +263,7 @@ fn a_batch_larger_than_one_statement_is_one_transaction() {
 }
 
 #[test]
-fn a_row_modified_outside_the_backend_fails_the_rebuild_that_reads_it() {
+fn a_row_modified_outside_the_backend_fails_the_query_that_reads_it() {
     block_on(async {
         let db = fresh_db();
         let store = Store::new(db.clone());
@@ -280,7 +279,10 @@ fn a_row_modified_outside_the_backend_fails_the_rebuild_that_reads_it() {
         .await
         .unwrap();
         let reopened = Store::new(db);
-        let failure = Keyline::<Local>::members(&reopened, id(DOC))
+        // The materialized evaluation is trusted (it was derived from verified certificates at
+        // insert); a query that evaluates certificates it reads, as a subset must, verifies them.
+        let all: std::collections::BTreeSet<_> = root().iter().map(|cert| cert.id()).collect();
+        let failure = Keyline::<Local>::members_for_subset(&reopened, all, id(DOC))
             .await
             .unwrap_err();
         assert!(
@@ -293,7 +295,7 @@ fn a_row_modified_outside_the_backend_fails_the_rebuild_that_reads_it() {
             ),
             "{failure:?}"
         );
-        // Answers that read rows, not the evaluation, do not verify.
+        // Answers that read the rows without evaluating them do not verify.
         assert_eq!(
             Keyline::<Local>::certificates(&reopened)
                 .await

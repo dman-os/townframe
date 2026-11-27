@@ -7,6 +7,5 @@ SELECT digest
      , power
      , citation
   FROM keyline_certificates
- WHERE kind = 0
-   AND subject = :subject
+ WHERE subject = :subject
    AND audience = :audience

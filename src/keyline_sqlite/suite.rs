@@ -23,8 +23,10 @@ use crate::MIGRATIONS;
 use crate::SqliteKeyline;
 
 mod conformance;
+mod demand;
 mod differential;
 mod plans;
+mod recording;
 mod scaling;
 mod transactions;
 

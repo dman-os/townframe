@@ -6,7 +6,19 @@ pub const MIGRATION_TABLE: &str = "_keyline_sqlite_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
+    Migration { version: 2, name: "002_materialized_evaluation.sql", sql: include_str!("migrations/002_materialized_evaluation.sql") },
 ];
+
+pub const ADMIN_REACH_OF_SQL: &str = include_str!("queries/admin_reach_of.sql");
+pub async fn admin_reach_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, k: Vec<u8>) -> SqlResult<Vec<Vec<u8>>> {
+    let set = db.query(ADMIN_REACH_OF_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(k)]).await?;
+    set.all()
+}
+
+pub const AFFECTED_DISPUTED_SQL: &str = include_str!("queries/affected_disputed.sql");
+pub async fn affected_disputed(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(AFFECTED_DISPUTED_SQL, &[]).await
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AllCertificateIdsRow {
@@ -62,6 +74,101 @@ pub async fn certificate_signed(db: &impl crate::sqlite_rs_alias::QueryExecutor,
     set.optional()
 }
 
+pub const CLAIM_CTX_USE_SQL: &str = include_str!("queries/claim_ctx_use.sql");
+pub async fn claim_ctx_use(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLAIM_CTX_USE_SQL, &[]).await
+}
+
+pub const CLAIM_ROOTS_SQL: &str = include_str!("queries/claim_roots.sql");
+pub async fn claim_roots(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLAIM_ROOTS_SQL, &[]).await
+}
+
+pub const CLEAR_AFFECTED_SQL: &str = include_str!("queries/clear_affected.sql");
+pub async fn clear_affected(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_AFFECTED_SQL, &[]).await
+}
+
+pub const CLEAR_CTX_USE_SQL: &str = include_str!("queries/clear_ctx_use.sql");
+pub async fn clear_ctx_use(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_CTX_USE_SQL, &[]).await
+}
+
+pub const CLEAR_DISPUTES_SQL: &str = include_str!("queries/clear_disputes.sql");
+pub async fn clear_disputes(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_DISPUTES_SQL, &[]).await
+}
+
+pub const CLEAR_LIVE_SQL: &str = include_str!("queries/clear_live.sql");
+pub async fn clear_live(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_LIVE_SQL, &[]).await
+}
+
+pub const CLEAR_NEW_SQL: &str = include_str!("queries/clear_new.sql");
+pub async fn clear_new(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_NEW_SQL, &[]).await
+}
+
+pub const CLEAR_ROOTS_SQL: &str = include_str!("queries/clear_roots.sql");
+pub async fn clear_roots(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_ROOTS_SQL, &[]).await
+}
+
+pub const CLEAR_TOUCHED_SQL: &str = include_str!("queries/clear_touched.sql");
+pub async fn clear_touched(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_TOUCHED_SQL, &[]).await
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosureCertificatesRow {
+    pub kind: i64,
+    pub digest: Vec<u8>,
+    pub signed: Vec<u8>,
+}
+impl crate::sqlite_rs_alias::FromRow for ClosureCertificatesRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(3)?;
+        Ok(ClosureCertificatesRow { kind: row.get::<i64>("kind")?, digest: row.get::<Vec<u8>>("digest")?, signed: row.get::<Vec<u8>>("signed")? })
+    }
+}
+
+pub const CLOSURE_CERTIFICATES_SQL: &str = include_str!("queries/closure_certificates.sql");
+pub async fn closure_certificates(db: &impl crate::sqlite_rs_alias::QueryExecutor, s: Vec<u8>) -> SqlResult<Vec<ClosureCertificatesRow>> {
+    let set = db.query(CLOSURE_CERTIFICATES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(s)]).await?;
+    set.all()
+}
+
+pub const COUNT_AFFECTED_SQL: &str = include_str!("queries/count_affected.sql");
+pub async fn count_affected(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<i64> {
+    let set = db.query(COUNT_AFFECTED_SQL, &[]).await?;
+    set.one()
+}
+
+pub const CTX_OF_SQL: &str = include_str!("queries/ctx_of.sql");
+pub async fn ctx_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, signature: Vec<u8>) -> SqlResult<i64> {
+    let set = db.query(CTX_OF_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(signature)]).await?;
+    set.one()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DelegationRowRow {
+    pub subject: Vec<u8>,
+    pub issuer: Vec<u8>,
+    pub power: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for DelegationRowRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(3)?;
+        Ok(DelegationRowRow { subject: row.get::<Vec<u8>>("subject")?, issuer: row.get::<Vec<u8>>("issuer")?, power: row.get::<i64>("power")? })
+    }
+}
+
+pub const DELEGATION_ROW_SQL: &str = include_str!("queries/delegation_row.sql");
+pub async fn delegation_row(db: &impl crate::sqlite_rs_alias::QueryExecutor, digest: Vec<u8>) -> SqlResult<Option<DelegationRowRow>> {
+    let set = db.query(DELEGATION_ROW_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await?;
+    set.optional()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DelegationsToRow {
     pub digest: Vec<u8>,
@@ -82,9 +189,170 @@ pub async fn delegations_to(db: &impl crate::sqlite_rs_alias::QueryExecutor, sub
     set.all()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeOfRow {
+    pub ctx: i64,
+    pub total: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for DisputeOfRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(DisputeOfRow { ctx: row.get::<i64>("ctx")?, total: row.get::<i64>("total")? })
+    }
+}
+
+pub const DISPUTE_OF_SQL: &str = include_str!("queries/dispute_of.sql");
+pub async fn dispute_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, delegation: Vec<u8>) -> SqlResult<Option<DisputeOfRow>> {
+    let set = db.query(DISPUTE_OF_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(delegation)]).await?;
+    set.optional()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputedDelegationsRow {
+    pub delegation: Vec<u8>,
+    pub issuer: Vec<u8>,
+    pub audience: Vec<u8>,
+    pub revoker: Vec<u8>,
+}
+impl crate::sqlite_rs_alias::FromRow for DisputedDelegationsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(4)?;
+        Ok(DisputedDelegationsRow { delegation: row.get::<Vec<u8>>("delegation")?, issuer: row.get::<Vec<u8>>("issuer")?, audience: row.get::<Vec<u8>>("audience")?, revoker: row.get::<Vec<u8>>("revoker")? })
+    }
+}
+
+pub const DISPUTED_DELEGATIONS_SQL: &str = include_str!("queries/disputed_delegations.sql");
+pub async fn disputed_delegations(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<DisputedDelegationsRow>> {
+    let set = db.query(DISPUTED_DELEGATIONS_SQL, &[]).await?;
+    set.all()
+}
+
+pub const DISPUTED_FROM_DSUBJECTS_SQL: &str = include_str!("queries/disputed_from_dsubjects.sql");
+pub async fn disputed_from_dsubjects(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DISPUTED_FROM_DSUBJECTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch)]).await
+}
+
+pub const DISPUTED_FROM_REACH_SQL: &str = include_str!("queries/disputed_from_reach.sql");
+pub async fn disputed_from_reach(db: &impl crate::sqlite_rs_alias::Executor, first: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DISPUTED_FROM_REACH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(first)]).await
+}
+
+pub const DSUBJECT_OF_DELEGATIONS_SQL: &str = include_str!("queries/dsubject_of_delegations.sql");
+pub async fn dsubject_of_delegations(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DSUBJECT_OF_DELEGATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch)]).await
+}
+
+pub const DSUBJECT_OF_REVOCATIONS_SQL: &str = include_str!("queries/dsubject_of_revocations.sql");
+pub async fn dsubject_of_revocations(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DSUBJECT_OF_REVOCATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch)]).await
+}
+
+pub const HAS_AFFECTED_SQL: &str = include_str!("queries/has_affected.sql");
+pub async fn has_affected(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<bool> {
+    let set = db.query(HAS_AFFECTED_SQL, &[]).await?;
+    set.one()
+}
+
+pub const HAS_DISPUTED_SQL: &str = include_str!("queries/has_disputed.sql");
+pub async fn has_disputed(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<bool> {
+    let set = db.query(HAS_DISPUTED_SQL, &[]).await?;
+    set.one()
+}
+
+pub const IS_DISPUTED_SQL: &str = include_str!("queries/is_disputed.sql");
+pub async fn is_disputed(db: &impl crate::sqlite_rs_alias::QueryExecutor, subject: Vec<u8>) -> SqlResult<bool> {
+    let set = db.query(IS_DISPUTED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(subject)]).await?;
+    set.one()
+}
+
+pub const IS_EXCLUDED_SQL: &str = include_str!("queries/is_excluded.sql");
+pub async fn is_excluded(db: &impl crate::sqlite_rs_alias::QueryExecutor, ctx: i64, node: Vec<u8>) -> SqlResult<bool> {
+    let set = db.query(IS_EXCLUDED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(ctx), crate::sqlite_rs_alias::IntoValue::into_value(node)]).await?;
+    set.one()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveMembersRow {
+    pub n: Vec<u8>,
+    pub lvl: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for LiveMembersRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(LiveMembersRow { n: row.get::<Vec<u8>>("n")?, lvl: row.get::<i64>("lvl")? })
+    }
+}
+
+pub const LIVE_MEMBERS_SQL: &str = include_str!("queries/live_members.sql");
+pub async fn live_members(db: &impl crate::sqlite_rs_alias::QueryExecutor, s: Vec<u8>) -> SqlResult<Vec<LiveMembersRow>> {
+    let set = db.query(LIVE_MEMBERS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(s)]).await?;
+    set.all()
+}
+
+pub const LIVE_ROUND_SQL: &str = include_str!("queries/live_round.sql");
+pub async fn live_round(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64, prev: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(LIVE_ROUND_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch), crate::sqlite_rs_alias::IntoValue::into_value(prev)]).await
+}
+
+pub const LIVE_SEED_SQL: &str = include_str!("queries/live_seed.sql");
+pub async fn live_seed(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(LIVE_SEED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch)]).await
+}
+
+pub const LIVE_STANDING_SQL: &str = include_str!("queries/live_standing.sql");
+pub async fn live_standing(db: &impl crate::sqlite_rs_alias::QueryExecutor, s: Vec<u8>, ctx: i64, n: Vec<u8>) -> SqlResult<Option<i64>> {
+    let set = db.query(LIVE_STANDING_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(s), crate::sqlite_rs_alias::IntoValue::into_value(ctx), crate::sqlite_rs_alias::IntoValue::into_value(n)]).await?;
+    set.one()
+}
+
+pub const META_EPOCH_SQL: &str = include_str!("queries/meta_epoch.sql");
+pub async fn meta_epoch(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<i64> {
+    let set = db.query(META_EPOCH_SQL, &[]).await?;
+    set.one()
+}
+
 pub const META_VERSION_SQL: &str = include_str!("queries/meta_version.sql");
 pub async fn meta_version(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<i64> {
     let set = db.query(META_VERSION_SQL, &[]).await?;
+    set.one()
+}
+
+pub const PUT_CTX_SQL: &str = include_str!("queries/put_ctx.sql");
+pub async fn put_ctx(db: &impl crate::sqlite_rs_alias::Executor, signature: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(PUT_CTX_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(signature)]).await
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReachMembersRow {
+    pub n: Vec<u8>,
+    pub lvl: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for ReachMembersRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(ReachMembersRow { n: row.get::<Vec<u8>>("n")?, lvl: row.get::<i64>("lvl")? })
+    }
+}
+
+pub const REACH_MEMBERS_SQL: &str = include_str!("queries/reach_members.sql");
+pub async fn reach_members(db: &impl crate::sqlite_rs_alias::QueryExecutor, s: Vec<u8>) -> SqlResult<Vec<ReachMembersRow>> {
+    let set = db.query(REACH_MEMBERS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(s)]).await?;
+    set.all()
+}
+
+pub const REACH_ROUND_SQL: &str = include_str!("queries/reach_round.sql");
+pub async fn reach_round(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64, prev: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(REACH_ROUND_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch), crate::sqlite_rs_alias::IntoValue::into_value(prev)]).await
+}
+
+pub const REACH_SEED_SQL: &str = include_str!("queries/reach_seed.sql");
+pub async fn reach_seed(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(REACH_SEED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch)]).await
+}
+
+pub const REACH_STANDING_SQL: &str = include_str!("queries/reach_standing.sql");
+pub async fn reach_standing(db: &impl crate::sqlite_rs_alias::QueryExecutor, s: Vec<u8>, n: Vec<u8>) -> SqlResult<Option<i64>> {
+    let set = db.query(REACH_STANDING_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(s), crate::sqlite_rs_alias::IntoValue::into_value(n)]).await?;
     set.one()
 }
 
@@ -94,8 +362,33 @@ pub async fn revocations_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, del
     set.all()
 }
 
+pub const SET_EPOCH_SQL: &str = include_str!("queries/set_epoch.sql");
+pub async fn set_epoch(db: &impl crate::sqlite_rs_alias::Executor, epoch: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(SET_EPOCH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(epoch)]).await
+}
+
 pub const SUBJECTS_SQL: &str = include_str!("queries/subjects.sql");
 pub async fn subjects(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<Vec<u8>>> {
     let set = db.query(SUBJECTS_SQL, &[]).await?;
     set.all()
+}
+
+pub const TOUCHED_ADMIN_SQL: &str = include_str!("queries/touched_admin.sql");
+pub async fn touched_admin(db: &impl crate::sqlite_rs_alias::Executor, first: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(TOUCHED_ADMIN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(first)]).await
+}
+
+pub const TOUCHED_DELEGATIONS_SQL: &str = include_str!("queries/touched_delegations.sql");
+pub async fn touched_delegations(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(TOUCHED_DELEGATIONS_SQL, &[]).await
+}
+
+pub const TOUCHED_NAMED_SQL: &str = include_str!("queries/touched_named.sql");
+pub async fn touched_named(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(TOUCHED_NAMED_SQL, &[]).await
+}
+
+pub const TOUCHED_REACH_SQL: &str = include_str!("queries/touched_reach.sql");
+pub async fn touched_reach(db: &impl crate::sqlite_rs_alias::Executor, first: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(TOUCHED_REACH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(first)]).await
 }

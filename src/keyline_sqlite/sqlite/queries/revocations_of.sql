@@ -3,5 +3,4 @@
 -- returns: digest Vec<u8>
 SELECT digest
   FROM keyline_certificates
- WHERE kind = 1
-   AND revoke = :delegation
+ WHERE revoke = :delegation

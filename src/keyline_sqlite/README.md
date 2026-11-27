@@ -6,11 +6,13 @@ authority graph of keyhive: signed delegations and revocations, evaluated by str
 - The certificate set and its version live in two tables, in a database that can be shared with
   other stores. `SqliteKeyline::insert_in` adds a batch inside a transaction the caller owns, so
   a grant commits or rolls back with the rows written beside it.
-- Set-shaped queries are SQL over indexes; the evaluation is `keyline_memory`'s, cached in memory
-  per version and rebuilt (with signatures verified again) from the rows when the cache is stale.
-  See the crate docs for why it is not recursive CTEs.
+- The positive reach (stratum 1) is a table extended at insert, in the caller's transaction, by
+  semi-naive SQL rounds; the live set (stratum 2) is computed per subject only where a revocation
+  disputes it. Point queries are indexed reads. See the crate docs and
+  `docs/scratch/hive-store-design.md`.
 - Verified by the upstream conformance suite, a differential proptest against `MemoryKeyline`,
-  transaction tests, query-plan tests and allocation scaling checks. `benches/instr.rs` holds
+  transaction tests, query-plan tests, statement and row counts for point queries, inserts and gift certificates (with planted bugs the
+  checks must catch) and allocation scaling checks. `benches/instr.rs` holds
   the instruction-count benches.
 
 ## Platforms
