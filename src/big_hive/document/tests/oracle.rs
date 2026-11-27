@@ -19,13 +19,13 @@ use automerge::transaction::Transactable;
 
 use super::*;
 
-pub(in crate::document) struct Stored {
+pub(crate) struct Stored {
     pub change: Change,
     pub rev: Rev,
     pub keyed: bool,
 }
 
-pub(in crate::document) struct DocModel {
+pub(crate) struct DocModel {
     pub changes: Vec<Stored>,
     pub tree_rev: Rev,
     pub readable: bool,
@@ -34,9 +34,11 @@ pub(in crate::document) struct DocModel {
     /// The remote node's replica, which its next change builds on.
     remote: Automerge,
     remote_writes: u64,
+    /// The document's key epoch: a membership change moves it.
+    pub epoch: u64,
 }
 
-pub(in crate::document) struct World {
+pub(crate) struct World {
     pub docs: Vec<DocModel>,
     /// Whether a commit's frontier row is checked against the revision it expects. Off, it is
     /// written whatever the tree held (a store without the compare-and-set).
@@ -88,6 +90,7 @@ impl World {
                     frontier: None,
                     remote: Automerge::new().with_actor(ActorId::from(vec![0xb0, at as u8])),
                     remote_writes: 0,
+                    epoch: 0,
                 })
                 .collect(),
             rev: 0,

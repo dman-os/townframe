@@ -212,6 +212,11 @@ fn planted_reuse_of_the_actor_after_a_failed_commit_is_caught() {
 }
 
 #[test]
+fn planted_apply_on_stale_is_caught() {
+    caught(Plant::ApplyOnStale, "law");
+}
+
+#[test]
 fn planted_trust_in_the_landed_revision_is_caught() {
     caught(Plant::TrustLandedRev, "frontier");
 }

@@ -613,6 +613,21 @@ impl Sim {
         let at = pick % self.flights.len();
         let flight = self.flights.remove(at);
         let doc = flight.doc;
+        // the commit's transaction checks the epoch the change was encrypted under
+        if let Ask::Commit(plan) = &flight.ask
+            && plan
+                .if_epoch
+                .is_some_and(|epoch| epoch != self.world.docs[doc].epoch)
+        {
+            let machine = self.machines[doc]
+                .as_mut()
+                .expect("a call's machine is there");
+            machine
+                .doc
+                .committed(flight.call, Outcome::Stale { doc: doc as u64 });
+            self.flush(doc);
+            return;
+        }
         if let (Some(now), Ask::Commit(plan)) = (undecided, &flight.ask) {
             let change = Change::from_bytes(plan.change.ciphertext.clone()).expect("a change");
             if now {
@@ -679,6 +694,7 @@ impl Sim {
                     Outcome::Done(EncryptedChange {
                         token,
                         ciphertext: change,
+                        epoch: self.world.docs[doc].epoch,
                     }),
                 );
             }
@@ -922,6 +938,13 @@ impl Sim {
             }
             match &flight.ask {
                 Ask::Commit(plan) => {
+                    // (a commit whose epoch moved was refused)
+                    if plan
+                        .if_epoch
+                        .is_some_and(|e| e != self.world.docs[flight.doc].epoch)
+                    {
+                        continue;
+                    }
                     let change =
                         Change::from_bytes(plan.change.ciphertext.clone()).expect("a change");
                     batch.push((flight.doc, change, plan.frontier.clone()));

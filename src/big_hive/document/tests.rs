@@ -6,4 +6,4 @@ use super::*;
 
 mod invariants;
 mod laws;
-pub(super) mod oracle;
+pub(crate) mod oracle;

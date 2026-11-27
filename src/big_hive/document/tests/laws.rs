@@ -331,6 +331,33 @@ fn law_5_a_dropped_document_that_was_behind_has_a_stale_frontier() {
     assert_eq!(sim.world.frontier_rev(0), sim.world.tree_rev(0));
 }
 
+/// Found by the Write coordinator's simulation: a commit that finds content in the tree it has
+/// not applied raised `known_rev` past it, and a document blocked on keys stayed blocked, with
+/// no later feed row to make it ask again.
+#[test]
+fn law_5_a_commit_that_finds_unapplied_content_fetches_it_even_when_blocked() {
+    let mut sim = live();
+    sim.remote_write(0, false);
+    sim.deliver_all();
+    assert!(sim.complete_kind(0, "decrypt", false));
+    assert!(sim.describe(0).contains("blocked"), "{}", sim.describe(0));
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    // another node's change lands before this write's commit, and its feed row is slow
+    sim.remote_write(0, true);
+    assert!(sim.complete_kind(0, "commit", false));
+    sim.deliver_all();
+    sim.quiesce();
+    // (the new change builds on the one that has no key, so it is not visible either; but the
+    // machine has read the tree through it)
+    assert_eq!(sim.live(0), Some(keys(&["l1"])));
+    assert!(
+        sim.describe(0).starts_with("live@3/blocked"),
+        "{}",
+        sim.describe(0)
+    );
+}
+
 #[test]
 fn law_6_parked_means_blocked() {
     let mut sim = Sim::new(1, None);
@@ -421,4 +448,45 @@ fn a_stale_handle_is_refused() {
     sim.write(0, WriteKind::Stale);
     sim.write(0, WriteKind::Bad);
     sim.quiesce();
+}
+
+/// A membership change lands between the encryption and the commit: the commit writes nothing,
+/// the same change is encrypted again under the new epoch, and committed.
+#[test]
+fn law_7_a_stale_commit_applies_nothing_and_the_change_is_encrypted_again() {
+    let mut sim = live();
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    sim.read(0);
+    sim.move_epoch(0);
+    assert!(sim.complete_kind(0, "commit", false));
+    assert_eq!(sim.world.visible(0), keys(&[]), "nothing landed");
+    assert_eq!(sim.in_flight(0), ["encrypt"], "only the encryption repeats");
+    assert_eq!(sim.unanswered(), 2, "the write and the read still wait");
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_kind(0, "commit", false));
+    assert_eq!(sim.world.visible(0), keys(&["l1"]));
+    assert_eq!(sim.unanswered(), 0);
+}
+
+#[test]
+fn a_write_whose_epoch_keeps_moving_is_answered_stale() {
+    let mut sim = live();
+    sim.write(0, WriteKind::Normal);
+    // the default limit is three repeats: the fourth stale commit is answered
+    for _ in 0..4 {
+        assert!(sim.complete_kind(0, "encrypt", false));
+        sim.move_epoch(0);
+        assert!(sim.complete_kind(0, "commit", false));
+    }
+    assert_eq!(
+        sim.unanswered(),
+        0,
+        "answered, with Rejected::Stale (the rig checks it)"
+    );
+    assert_eq!(sim.world.visible(0), keys(&[]));
+    // the change was forgotten: a new document, and no new actor (nothing could have landed)
+    assert_eq!(sim.in_flight(0), ["hydrate"]);
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(sim.live(0), Some(keys(&[])));
 }

@@ -373,11 +373,19 @@ impl<O> Document<O> {
                         out,
                     }) => {
                         let call = self.fresh_call();
-                        self.pending.push(Command::PrepareEncrypt { call, change });
+                        self.pending.push(Command::PrepareEncrypt {
+                            call,
+                            change: change.clone(),
+                        });
                         self.writes = Writes::Encrypting {
                             call,
                             ticket,
-                            built: Built { frontier, out },
+                            built: Built {
+                                bytes: change,
+                                frontier,
+                                out,
+                            },
+                            attempts: 0,
                         };
                         false
                     }
@@ -396,6 +404,7 @@ impl<O> Document<O> {
                     frontier,
                     out,
                 }) => {
+                    let changed = bytes.is_some();
                     self.pending.push(Command::Prepared {
                         plan,
                         result: Ok(PlanPrepared {
@@ -404,7 +413,11 @@ impl<O> Document<O> {
                             out,
                         }),
                     });
-                    self.writes = Writes::HeldForPlan { plan, frontier };
+                    self.writes = Writes::HeldForPlan {
+                        plan,
+                        frontier,
+                        changed,
+                    };
                     false
                 }
             },

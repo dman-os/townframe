@@ -62,6 +62,8 @@ pub(in crate::document) enum Op {
     Duplicate(u8),
     Advance(u8),
     Tick,
+    /// A membership change moves a document's key epoch.
+    MoveEpoch(u8),
     Evict(u8),
     Crash {
         landed: u8,
@@ -110,6 +112,7 @@ impl Sim {
             Op::Duplicate(pick) => self.duplicate(usize::from(pick)),
             Op::Advance(by) => self.advance(Duration::from_millis(250 * u64::from(by))),
             Op::Tick => self.tick(),
+            Op::MoveEpoch(d) => self.world.docs[doc(d)].epoch += 1,
             Op::Evict(d) => {
                 let d = doc(d);
                 if self.machines[d].as_ref().is_some_and(|m| m.doc.evictable()) {
@@ -143,6 +146,7 @@ pub(in crate::document) fn op() -> impl Strategy<Value = Op> {
         2 => any::<u8>().prop_map(Op::Duplicate),
         2 => any::<u8>().prop_map(Op::Advance),
         2 => Just(Op::Tick),
+        3 => any::<u8>().prop_map(Op::MoveEpoch),
         2 => any::<u8>().prop_map(Op::Evict),
         1 => any::<u8>().prop_map(|landed| Op::Crash { landed }),
     ]
